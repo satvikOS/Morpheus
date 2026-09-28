@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -44,10 +47,129 @@ MARKERS: deque[dict[str, Any]] = deque(maxlen=200)
 _marker_outlet: Any = None
 
 
+class LocalRecorder:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._file: Any = None
+        self.session_id: str | None = None
+        self.path: str | None = None
+        self.samples = 0
+        self.markers = 0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(os.environ.get("MORPHEUS_LOCAL_RECORDING_DIR"))
+
+    @property
+    def active(self) -> bool:
+        return self._file is not None
+
+    def start(self, session_id: str | None = None) -> dict[str, Any]:
+        if not self.enabled:
+            return {
+                "started": False,
+                "reason": "Local recording is disabled. Set MORPHEUS_LOCAL_RECORDING_DIR on the local gateway.",
+            }
+
+        with self._lock:
+            if self._file is not None:
+                return {
+                    "started": True,
+                    "session_id": self.session_id,
+                    "path": self.path,
+                    "already_active": True,
+                }
+
+            root = Path(os.environ["MORPHEUS_LOCAL_RECORDING_DIR"]).expanduser().resolve()
+            root.mkdir(parents=True, exist_ok=True)
+            sid = session_id or datetime.now(timezone.utc).strftime("session-%Y%m%dT%H%M%SZ")
+            safe_sid = "".join(char for char in sid if char.isalnum() or char in "-_")[:96] or "session"
+            path = root / f"{safe_sid}.jsonl"
+            self._file = path.open("a", encoding="utf-8", buffering=1)
+            self.session_id = safe_sid
+            self.path = str(path)
+            self.samples = 0
+            self.markers = 0
+            self._write({
+                "kind": "session_start",
+                "session_id": safe_sid,
+                "timestamp": time.time(),
+                "iso_time": datetime.now(timezone.utc).isoformat(),
+                "format": "morpheus-jsonl-v1",
+            })
+            return {"started": True, "session_id": safe_sid, "path": str(path)}
+
+    def _write(self, payload: dict[str, Any]) -> None:
+        if self._file is None:
+            return
+        self._file.write(json.dumps(payload, separators=(",", ":")) + "\n")
+
+    def write_sample(self, stream: str, timestamp: float, channels: list[float], simulated: bool) -> None:
+        with self._lock:
+            if self._file is None:
+                return
+            self._write({
+                "kind": "sample",
+                "stream": stream,
+                "timestamp": timestamp,
+                "channels": channels,
+                "simulated": simulated,
+            })
+            self.samples += 1
+
+    def write_marker(self, marker: dict[str, Any]) -> None:
+        with self._lock:
+            if self._file is None:
+                return
+            self._write({"kind": "marker", **marker})
+            self.markers += 1
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            if self._file is None:
+                return {"stopped": False, "reason": "No local recording is active."}
+
+            self._write({
+                "kind": "session_stop",
+                "timestamp": time.time(),
+                "samples": self.samples,
+                "markers": self.markers,
+            })
+            self._file.close()
+            result = {
+                "stopped": True,
+                "session_id": self.session_id,
+                "path": self.path,
+                "samples": self.samples,
+                "markers": self.markers,
+            }
+            self._file = None
+            self.session_id = None
+            self.path = None
+            return result
+
+    def state(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "active": self.active,
+            "session_id": self.session_id,
+            "path": self.path,
+            "samples": self.samples,
+            "markers": self.markers,
+        }
+
+
+RECORDER = LocalRecorder()
+
+
 class MarkerRequest(BaseModel):
     label: str = Field(min_length=1, max_length=128)
     timestamp: float | None = None
     payload: dict[str, Any] | None = None
+
+
+class RecordingStartRequest(BaseModel):
+    session_id: str | None = Field(default=None, max_length=96)
 
 
 def discover_lsl() -> list[dict[str, Any]]:
@@ -132,7 +254,8 @@ def capabilities() -> dict[str, Any]:
         "websocket_samples": True,
         "markers": True,
         "synthetic_fallback": True,
-        "recording": False,
+        "recording": RECORDER.enabled,
+        "recording_active": RECORDER.active,
         "raw_recording_policy": "local-only",
     }
 
@@ -162,6 +285,24 @@ def brainflow_board(board_id: int) -> dict[str, Any]:
         }
 
 
+@app.get("/recording")
+@app.get("/api/signal-gateway/recording")
+def recording_state() -> dict[str, Any]:
+    return RECORDER.state()
+
+
+@app.post("/recording/start")
+@app.post("/api/signal-gateway/recording/start")
+def recording_start(request: RecordingStartRequest) -> dict[str, Any]:
+    return RECORDER.start(request.session_id)
+
+
+@app.post("/recording/stop")
+@app.post("/api/signal-gateway/recording/stop")
+def recording_stop() -> dict[str, Any]:
+    return RECORDER.stop()
+
+
 @app.post("/markers")
 @app.post("/api/signal-gateway/markers")
 def markers(marker: MarkerRequest) -> dict[str, Any]:
@@ -172,6 +313,7 @@ def markers(marker: MarkerRequest) -> dict[str, Any]:
         "payload": marker.payload or {},
     }
     MARKERS.appendleft(record)
+    RECORDER.write_marker(record)
 
     outlet = get_marker_outlet()
     emitted_to_lsl = False
@@ -211,6 +353,7 @@ async def synthetic_stream(ws: WebSocket) -> None:
                 0.09 * math.sin(phase * 11.6 + 0.9),
                 0.07 * math.sin(phase * 3.8 + 2.9),
             ]
+            RECORDER.write_sample("Morpheus Synthetic Reference", now, sample, True)
             await ws.send_text(
                 json.dumps(
                     {
@@ -257,12 +400,15 @@ async def websocket_samples(ws: WebSocket) -> None:
                 await asyncio.sleep(0.004)
                 continue
 
+            channel_values = [float(value) for value in sample]
+            stream_name = inlet.info().name()
+            RECORDER.write_sample(stream_name, float(timestamp), channel_values, False)
             await ws.send_text(
                 json.dumps(
                     {
-                        "stream": inlet.info().name(),
+                        "stream": stream_name,
                         "ts": float(timestamp),
-                        "channels": [float(value) for value in sample],
+                        "channels": channel_values,
                         "simulated": False,
                     }
                 )
