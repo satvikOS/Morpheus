@@ -1,221 +1,215 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Activity, SlidersHorizontal } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  Gauge,
+  Keyboard,
+  MonitorCog,
+  SlidersHorizontal,
+} from "lucide-react";
 import type { SharedSignalRing } from "@/lib/use-signal-engine";
 
 type Montage = "raw" | "average";
 type Polarity = "negative-up" | "positive-up";
 
-const MAX_RENDER_SAMPLES = 4096;
-
 export default function SignalCanvas({
   ring,
   snapshots,
-  packetRate,
+  sampleRate,
   sourceMode,
   sourceName,
+  channelUnit = "",
+  channelLabels = [],
   compact = false,
+  active = true,
 }: {
   ring: SharedSignalRing | null;
   snapshots: number[][];
-  packetRate: number;
+  sampleRate: number;
   sourceMode: "live" | "simulation" | "idle";
   sourceName: string;
+  channelUnit?: string;
+  channelLabels?: string[];
   compact?: boolean;
+  active?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const [renderer, setRenderer] = useState("initializing");
   const [timeWindow, setTimeWindow] = useState(compact ? 5 : 10);
   const [gain, setGain] = useState(1);
   const [polarity, setPolarity] = useState<Polarity>("negative-up");
   const [montage, setMontage] = useState<Montage>("raw");
-  const settingsRef = useRef({ timeWindow, gain, polarity, montage, packetRate });
+  const [uvPerMm, setUvPerMm] = useState(10);
+  const [pxPerMm, setPxPerMm] = useState(0);
+  const [canvasCssWidth, setCanvasCssWidth] = useState(0);
+
+  const normalizedUnit = channelUnit.toLowerCase().replace("μ", "u").replace("µ", "u");
+  const calibratedUv = normalizedUnit === "uv" || normalizedUnit.includes("microvolt");
 
   useEffect(() => {
-    settingsRef.current = { timeWindow, gain, polarity, montage, packetRate };
-  }, [timeWindow, gain, polarity, montage, packetRate]);
+    try {
+      const stored = Number(localStorage.getItem("morpheus.display.px-per-mm") || "0");
+      if (Number.isFinite(stored) && stored > 0) setPxPerMm(stored);
+    } catch {}
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const gl = canvas.getContext("webgl2", {
-      alpha: false,
-      antialias: true,
-      desynchronized: true,
-      powerPreference: "high-performance",
+    if (!("transferControlToOffscreen" in canvas)) {
+      setRenderer("offscreen-unavailable");
+      return;
+    }
+
+    const worker = new Worker("/workers/signal-render-worker.js");
+    workerRef.current = worker;
+
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    setCanvasCssWidth(rect.width);
+
+    const offscreen = canvas.transferControlToOffscreen();
+    worker.postMessage(
+      {
+        type: "init",
+        canvas: offscreen,
+        dataBuffer: ring?.data.buffer,
+        controlBuffer: ring?.control.buffer,
+        capacity: ring?.capacity || 0,
+        maxChannels: ring?.maxChannels || 0,
+        width: rect.width,
+        height: rect.height,
+        dpr,
+      },
+      [offscreen],
+    );
+
+    worker.onmessage = (event) => {
+      const message = event.data || {};
+      if (message.type === "renderer-ready") {
+        setRenderer(String(message.backend || "offscreen-webgl2"));
+      }
+      if (message.type === "renderer-error") {
+        setRenderer("renderer-error");
+      }
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const next = entry.contentRect;
+      setCanvasCssWidth(next.width);
+      worker.postMessage({
+        type: "resize",
+        width: next.width,
+        height: next.height,
+        dpr: Math.min(window.devicePixelRatio || 1, 2),
+      });
     });
-    if (!gl) return;
 
-    const vertex = gl.createShader(gl.VERTEX_SHADER)!;
-    gl.shaderSource(
-      vertex,
-      `#version 300 es
-      in vec2 aPosition;
-      void main() {
-        gl_Position = vec4(aPosition, 0.0, 1.0);
-      }`,
-    );
-    gl.compileShader(vertex);
-
-    const fragment = gl.createShader(gl.FRAGMENT_SHADER)!;
-    gl.shaderSource(
-      fragment,
-      `#version 300 es
-      precision highp float;
-      out vec4 outColor;
-      uniform float uAlpha;
-      void main() {
-        outColor = vec4(0.48, 0.78, 0.95, uAlpha);
-      }`,
-    );
-    gl.compileShader(fragment);
-
-    const program = gl.createProgram()!;
-    gl.attachShader(program, vertex);
-    gl.attachShader(program, fragment);
-    gl.linkProgram(program);
-    gl.useProgram(program);
-
-    const positionLocation = gl.getAttribLocation(program, "aPosition");
-    const alphaLocation = gl.getUniformLocation(program, "uAlpha");
-    const buffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const width = Math.max(1, Math.floor(rect.width * dpr));
-      const height = Math.max(1, Math.floor(rect.height * dpr));
-
-      if (canvas.width !== width || canvas.height !== height) {
-        canvas.width = width;
-        canvas.height = height;
-        gl.viewport(0, 0, width, height);
-      }
-    };
-
-    const observer = new ResizeObserver(resize);
     observer.observe(canvas);
-    resize();
-
-    let raf = 0;
-    let vertices = new Float32Array(MAX_RENDER_SAMPLES * 2);
-
-    const frame = () => {
-      resize();
-      gl.clearColor(0.012, 0.025, 0.035, 1);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-
-      const { timeWindow: seconds, gain: currentGain, polarity: currentPolarity, montage: currentMontage, packetRate: rate } =
-        settingsRef.current;
-
-      const channelCount = ring
-        ? Math.max(0, Math.min(ring.maxChannels, Atomics.load(ring.control, 1)))
-        : snapshots.length;
-
-      const totalFrames = ring
-        ? Math.max(0, Atomics.load(ring.control, 2))
-        : Math.max(0, snapshots[0]?.length || 0);
-
-      const writeIndex = ring ? Atomics.load(ring.control, 0) : totalFrames;
-      const desired = Math.max(64, Math.round(Math.max(1, rate || 50) * seconds));
-      const sampleCount = Math.min(MAX_RENDER_SAMPLES, desired, totalFrames, ring?.capacity || totalFrames);
-
-      if (channelCount && sampleCount > 1) {
-        const polarityScale = currentPolarity === "negative-up" ? -1 : 1;
-        const laneHeight = 2 / channelCount;
-
-        for (let channel = 0; channel < channelCount; channel += 1) {
-          let maxAbs = 1e-6;
-          const values = new Float32Array(sampleCount);
-
-          for (let i = 0; i < sampleCount; i += 1) {
-            let value = 0;
-
-            if (ring) {
-              const start = (writeIndex - sampleCount + ring.capacity) % ring.capacity;
-              const frameIndex = (start + i) % ring.capacity;
-
-              if (currentMontage === "average") {
-                let sum = 0;
-                for (let c = 0; c < channelCount; c += 1) {
-                  sum += ring.data[frameIndex * ring.maxChannels + c];
-                }
-                value =
-                  ring.data[frameIndex * ring.maxChannels + channel] -
-                  sum / channelCount;
-              } else {
-                value = ring.data[frameIndex * ring.maxChannels + channel];
-              }
-            } else {
-              const source = snapshots[channel] || [];
-              const sourceIndex = Math.max(0, source.length - sampleCount + i);
-              value = source[sourceIndex] || 0;
-
-              if (currentMontage === "average") {
-                let sum = 0;
-                let contributors = 0;
-                for (const series of snapshots) {
-                  const idx = Math.max(0, series.length - sampleCount + i);
-                  if (idx < series.length) {
-                    sum += series[idx] || 0;
-                    contributors += 1;
-                  }
-                }
-                if (contributors) value -= sum / contributors;
-              }
-            }
-
-            values[i] = value;
-            maxAbs = Math.max(maxAbs, Math.abs(value));
-          }
-
-          if (vertices.length < sampleCount * 2) {
-            vertices = new Float32Array(sampleCount * 2);
-          }
-
-          const laneCenter = 1 - laneHeight * (channel + 0.5);
-          const amplitude = laneHeight * 0.34 * currentGain;
-
-          for (let i = 0; i < sampleCount; i += 1) {
-            const x = -1 + (i / (sampleCount - 1)) * 2;
-            const normalized = Math.max(-1, Math.min(1, values[i] / maxAbs));
-            const y = laneCenter + normalized * amplitude * polarityScale;
-            vertices[i * 2] = x;
-            vertices[i * 2 + 1] = y;
-          }
-
-          gl.bufferData(
-            gl.ARRAY_BUFFER,
-            vertices.subarray(0, sampleCount * 2),
-            gl.DYNAMIC_DRAW,
-          );
-          gl.uniform1f(alphaLocation, channel % 2 === 0 ? 0.86 : 0.72);
-          gl.drawArrays(gl.LINE_STRIP, 0, sampleCount);
-        }
-      }
-
-      raf = requestAnimationFrame(frame);
-    };
-
-    raf = requestAnimationFrame(frame);
 
     return () => {
-      cancelAnimationFrame(raf);
       observer.disconnect();
-      gl.deleteBuffer(buffer);
-      gl.deleteProgram(program);
-      gl.deleteShader(vertex);
-      gl.deleteShader(fragment);
+      worker.postMessage({ type: "stop" });
+      worker.terminate();
+      workerRef.current = null;
     };
+  }, [ring]);
+
+  useEffect(() => {
+    workerRef.current?.postMessage({
+      type: "settings",
+      settings: {
+        timeWindow,
+        gain,
+        polarity,
+        montage,
+        sampleRate: Math.max(1, sampleRate || 256),
+        pxPerMm,
+        uvPerMm,
+        calibratedUv,
+      },
+    });
+  }, [
+    timeWindow,
+    gain,
+    polarity,
+    montage,
+    sampleRate,
+    pxPerMm,
+    uvPerMm,
+    calibratedUv,
+  ]);
+
+  useEffect(() => {
+    workerRef.current?.postMessage({ type: "active", active });
+  }, [active]);
+
+  useEffect(() => {
+    if (ring || !workerRef.current) return;
+    workerRef.current.postMessage({
+      type: "snapshot",
+      channels: snapshots,
+    });
   }, [ring, snapshots]);
+
+  useEffect(() => {
+    const handle = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.tagName === "INPUT" ||
+        target?.tagName === "SELECT" ||
+        target?.tagName === "TEXTAREA"
+      ) {
+        return;
+      }
+
+      if (event.key === "[") {
+        setTimeWindow((value) => Math.max(1, value / 2));
+      } else if (event.key === "]") {
+        setTimeWindow((value) => Math.min(60, value * 2));
+      } else if (event.key.toLowerCase() === "p") {
+        setPolarity((value) =>
+          value === "negative-up" ? "positive-up" : "negative-up",
+        );
+      } else if (event.key.toLowerCase() === "m") {
+        setMontage((value) => (value === "raw" ? "average" : "raw"));
+      } else if (event.key === "-" || event.key === "_") {
+        setGain((value) => Math.max(0.25, value / 2));
+      } else if (event.key === "=" || event.key === "+") {
+        setGain((value) => Math.min(8, value * 2));
+      }
+    };
+
+    window.addEventListener("keydown", handle);
+    return () => window.removeEventListener("keydown", handle);
+  }, []);
 
   const channels = ring
     ? Math.max(0, Math.min(ring.maxChannels, Atomics.load(ring.control, 1)))
     : snapshots.length;
+
+  const timebase = useMemo(() => {
+    if (!pxPerMm || !canvasCssWidth || !timeWindow) return null;
+    const widthMm = canvasCssWidth / pxPerMm;
+    return widthMm / timeWindow;
+  }, [pxPerMm, canvasCssWidth, timeWindow]);
+
+  const setCalibration = (value: number) => {
+    const next = Number.isFinite(value) ? Math.max(0, Math.min(30, value)) : 0;
+    setPxPerMm(next);
+    try {
+      if (next > 0) {
+        localStorage.setItem("morpheus.display.px-per-mm", String(next));
+      } else {
+        localStorage.removeItem("morpheus.display.px-per-mm");
+      }
+    } catch {}
+  };
 
   return (
     <div className="signal-surface">
@@ -225,6 +219,7 @@ export default function SignalCanvas({
           <span className="truncate text-[10px] uppercase tracking-[.15em] text-slate-500">
             {sourceName || "Signal monitor"}
           </span>
+          <span className="renderer-badge">{renderer}</span>
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -271,22 +266,30 @@ export default function SignalCanvas({
         </div>
       </div>
 
-      <div className={`signal-canvas-wrap ${compact ? "signal-canvas-compact" : ""}`}>
+      <div
+        className={`signal-canvas-wrap ${compact ? "signal-canvas-compact" : ""}`}
+      >
         <canvas ref={canvasRef} className="signal-canvas" />
 
-        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-14 flex-col justify-around py-4 pl-2">
-          {Array.from({ length: Math.min(channels || 8, compact ? 8 : 16) }, (_, index) => (
-            <span
-              key={index}
-              className="font-mono text-[9px] tracking-wide text-slate-600"
-            >
-              CH{String(index + 1).padStart(2, "0")}
-            </span>
-          ))}
+        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-16 flex-col justify-around py-4 pl-2">
+          {Array.from(
+            { length: Math.min(channels || 8, compact ? 8 : 16) },
+            (_, index) => (
+              <span
+                key={index}
+                className="font-mono text-[9px] tracking-wide text-slate-600"
+              >
+                {channelLabels[index] ||
+                  `CH${String(index + 1).padStart(2, "0")}`}
+              </span>
+            ),
+          )}
         </div>
 
         <div className="pointer-events-none absolute bottom-2 right-3 flex gap-2 text-[9px] uppercase tracking-[.12em] text-slate-650">
+          <span>OffscreenCanvas</span>
           <span>WebGL2</span>
+          <span>Min/Max envelope</span>
           <span>{ring ? "Shared memory" : "Snapshot fallback"}</span>
         </div>
 
@@ -297,9 +300,79 @@ export default function SignalCanvas({
         ) : null}
       </div>
 
+      {!compact ? (
+        <div className="signal-calibration-panel">
+          <div className="signal-calibration-row">
+            <div className="flex items-center gap-2">
+              <MonitorCog size={13} />
+              <div>
+                <strong>Display calibration</strong>
+                <span>
+                  Set measured CSS pixels per physical millimetre. Until calibrated,
+                  Morpheus does not claim a physical mm/s scale.
+                </span>
+              </div>
+            </div>
+            <label className="calibration-input">
+              <span>px/mm</span>
+              <input
+                type="number"
+                min="0"
+                max="30"
+                step="0.01"
+                value={pxPerMm || ""}
+                placeholder="unset"
+                onChange={(event) => setCalibration(Number(event.target.value))}
+              />
+            </label>
+          </div>
+
+          <div className="signal-calibration-grid">
+            <div>
+              <Gauge size={12} />
+              <span>Timebase</span>
+              <strong>{timebase ? `${timebase.toFixed(2)} mm/s` : "UNCALIBRATED"}</strong>
+            </div>
+            <div>
+              <SlidersHorizontal size={12} />
+              <span>Amplitude</span>
+              <strong>
+                {calibratedUv && pxPerMm
+                  ? `${uvPerMm} µV/mm`
+                  : "RELATIVE"}
+              </strong>
+            </div>
+            <div>
+              <Keyboard size={12} />
+              <span>Hotkeys</span>
+              <strong>[ ] window · - + gain · P polarity · M montage</strong>
+            </div>
+          </div>
+
+          {calibratedUv && pxPerMm ? (
+            <label className="amplitude-scale-control">
+              <span>µV/mm</span>
+              <select
+                value={uvPerMm}
+                onChange={(event) => setUvPerMm(Number(event.target.value))}
+              >
+                {[2, 5, 10, 20, 50, 100].map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="signal-calibration-note">
         <SlidersHorizontal size={12} />
-        Relative gain is active. Physical mm/s and µV/mm display claims require a calibrated monitor and calibrated channel units from the acquisition source.
+        The renderer runs in a dedicated OffscreenCanvas worker with antialiasing
+        disabled. When samples exceed horizontal pixel density it renders a
+        per-pixel min/max envelope so narrow transients are not erased by naive
+        point skipping.
       </div>
     </div>
   );

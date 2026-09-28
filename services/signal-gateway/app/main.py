@@ -42,7 +42,7 @@ except Exception:
     RTCPeerConnection = None
     RTCSessionDescription = None
 
-app = FastAPI(title="Morpheus Signal Gateway", version="0.3.0")
+app = FastAPI(title="Morpheus Signal Gateway", version="0.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -141,17 +141,41 @@ class LocalRecorder:
             if self._file is None:
                 return {"stopped": False, "reason": "No local recording is active."}
 
+            stopped_at = time.time()
             self._write({
                 "kind": "session_stop",
-                "timestamp": time.time(),
+                "timestamp": stopped_at,
                 "samples": self.samples,
                 "markers": self.markers,
             })
+            self._file.flush()
             self._file.close()
+
+            session_path = Path(self.path or "")
+            digest = _sha256_file(session_path)
+            manifest_path = session_path.with_suffix(session_path.suffix + ".manifest.json")
+            manifest = {
+                "schema": "morpheus-session-manifest-v1",
+                "session_id": self.session_id,
+                "recording_path": str(session_path),
+                "sha256": digest,
+                "bytes": session_path.stat().st_size if session_path.exists() else 0,
+                "samples": self.samples,
+                "markers": self.markers,
+                "stopped_at": stopped_at,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
             result = {
                 "stopped": True,
                 "session_id": self.session_id,
-                "path": self.path,
+                "path": str(session_path),
+                "manifest_path": str(manifest_path),
+                "sha256": digest,
                 "samples": self.samples,
                 "markers": self.markers,
             }
@@ -171,13 +195,34 @@ class LocalRecorder:
         }
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def gateway_clock() -> tuple[float, str]:
+    if local_clock is not None:
+        return float(local_clock()), "lsl_local_clock"
+    return float(time.perf_counter()), "python_perf_counter"
+
+
 RECORDER = LocalRecorder()
 
 
 class MarkerRequest(BaseModel):
     label: str = Field(min_length=1, max_length=128)
-    timestamp: float | None = None
     payload: dict[str, Any] | None = None
+    request_id: str | None = Field(default=None, max_length=128)
+    client_monotonic: float | None = None
+    client_clock_domain: str | None = Field(default=None, max_length=64)
+    estimated_gateway_time: float | None = None
+    sync_uncertainty_ms: float | None = Field(default=None, ge=0, le=10000)
 
 
 class RecordingStartRequest(BaseModel):
@@ -272,6 +317,18 @@ def streams() -> dict[str, Any]:
     return {"streams": discover_lsl()}
 
 
+@app.get("/clock")
+@app.get("/api/signal-gateway/clock")
+def clock() -> dict[str, Any]:
+    clock_time, clock_domain = gateway_clock()
+    return {
+        "clock_time": clock_time,
+        "clock_domain": clock_domain,
+        "wall_time": time.time(),
+        "monotonic_ns": time.perf_counter_ns(),
+    }
+
+
 @app.get("/metrics")
 @app.get("/api/signal-gateway/metrics")
 def metrics() -> dict[str, Any]:
@@ -344,24 +401,53 @@ def recording_stop() -> dict[str, Any]:
     return RECORDER.stop()
 
 
-@app.post("/markers")
-@app.post("/api/signal-gateway/markers")
-def markers(marker: MarkerRequest) -> dict[str, Any]:
+def record_marker(marker: MarkerRequest) -> dict[str, Any]:
     global MARKER_SEQUENCE
     MARKER_SEQUENCE += 1
-    browser_timestamp = float(marker.timestamp) if marker.timestamp is not None else None
-    authoritative_timestamp = float(local_clock()) if local_clock is not None else time.time()
-    wall_timestamp = time.time()
+
+    arrival_time, clock_domain = gateway_clock()
+    estimated = (
+        float(marker.estimated_gateway_time)
+        if marker.estimated_gateway_time is not None
+        else None
+    )
+    uncertainty = (
+        float(marker.sync_uncertainty_ms)
+        if marker.sync_uncertainty_ms is not None
+        else None
+    )
+
+    use_mapped_event_time = (
+        estimated is not None
+        and uncertainty is not None
+        and uncertainty <= 20.0
+        and abs(estimated - arrival_time) <= 2.0
+    )
+
+    authoritative_timestamp = estimated if use_mapped_event_time else arrival_time
+    timestamp_method = (
+        "browser_event_mapped_to_gateway_clock"
+        if use_mapped_event_time
+        else "gateway_arrival"
+    )
+
     record = {
         "sequence": MARKER_SEQUENCE,
+        "request_id": marker.request_id,
         "received_monotonic_ns": time.perf_counter_ns(),
         "label": marker.label,
         "timestamp": authoritative_timestamp,
-        "wall_timestamp": wall_timestamp,
-        "browser_timestamp": browser_timestamp,
-        "clock_domain": "lsl_local_clock" if local_clock is not None else "system_wall_clock",
+        "arrival_timestamp": arrival_time,
+        "wall_timestamp": time.time(),
+        "client_monotonic": marker.client_monotonic,
+        "client_clock_domain": marker.client_clock_domain,
+        "estimated_gateway_time": estimated,
+        "sync_uncertainty_ms": uncertainty,
+        "clock_domain": clock_domain,
+        "timestamp_method": timestamp_method,
         "payload": marker.payload or {},
     }
+
     MARKERS.appendleft(record)
     RECORDER.write_marker(record)
 
@@ -369,7 +455,10 @@ def markers(marker: MarkerRequest) -> dict[str, Any]:
     emitted_to_lsl = False
     if outlet is not None:
         try:
-            outlet.push_sample([marker.label], timestamp=authoritative_timestamp)
+            outlet.push_sample(
+                [marker.label],
+                timestamp=float(authoritative_timestamp),
+            )
             emitted_to_lsl = True
         except Exception:
             emitted_to_lsl = False
@@ -379,6 +468,12 @@ def markers(marker: MarkerRequest) -> dict[str, Any]:
         "marker": record,
         "lsl_emitted": emitted_to_lsl,
     }
+
+
+@app.post("/markers")
+@app.post("/api/signal-gateway/markers")
+def markers(marker: MarkerRequest) -> dict[str, Any]:
+    return record_marker(marker)
 
 
 @app.get("/markers")
@@ -523,14 +618,53 @@ async def webrtc_offer(offer: WebRTCOffer) -> Any:
 
     @pc.on("datachannel")
     def on_datachannel(channel: Any) -> None:
-        if channel.label != "morpheus-samples":
+        if channel.label == "morpheus-samples":
+            @channel.on("open")
+            def on_sample_open() -> None:
+                task = asyncio.create_task(_lsl_datachannel(channel, offer.source_id))
+                WEBRTC_TASKS.add(task)
+                task.add_done_callback(WEBRTC_TASKS.discard)
             return
 
-        @channel.on("open")
-        def on_open() -> None:
-            task = asyncio.create_task(_lsl_datachannel(channel, offer.source_id))
-            WEBRTC_TASKS.add(task)
-            task.add_done_callback(WEBRTC_TASKS.discard)
+        if channel.label == "morpheus-control":
+            @channel.on("message")
+            def on_control_message(message: Any) -> None:
+                try:
+                    payload = json.loads(message if isinstance(message, str) else message.decode("utf-8"))
+                    if payload.get("type") != "marker":
+                        return
+
+                    result = record_marker(
+                        MarkerRequest(
+                            label=str(payload.get("label") or ""),
+                            payload=payload.get("payload") or {},
+                            request_id=payload.get("request_id"),
+                            client_monotonic=payload.get("client_monotonic"),
+                            client_clock_domain=payload.get("client_clock_domain"),
+                            estimated_gateway_time=payload.get("estimated_gateway_time"),
+                            sync_uncertainty_ms=payload.get("sync_uncertainty_ms"),
+                        )
+                    )
+                    channel.send(
+                        json.dumps(
+                            {
+                                "type": "marker_ack",
+                                "request_id": payload.get("request_id"),
+                                **result,
+                            }
+                        )
+                    )
+                except Exception as exc:
+                    channel.send(
+                        json.dumps(
+                            {
+                                "type": "marker_ack",
+                                "request_id": None,
+                                "accepted": False,
+                                "error": str(exc),
+                            }
+                        )
+                    )
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange() -> None:
@@ -621,6 +755,6 @@ async def websocket_samples(ws: WebSocket, source_id: str | None = None) -> None
 def root() -> dict[str, str]:
     return {
         "service": "Morpheus Signal Gateway",
-        "version": "0.3.0",
+        "version": "0.5.0",
         "purpose": "Low-latency LSL acquisition, synchronization, and workstation relay",
     }

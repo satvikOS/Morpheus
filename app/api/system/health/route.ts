@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
 
   return Response.json({
     service: "morpheus-workstation",
-    version: "0.4.0",
+    version: "0.5.0",
     ok: probes.every((item) => item.ok),
     probes,
     capabilities: {
@@ -56,6 +56,12 @@ export async function GET(request: NextRequest) {
       worker_owned_websocket: true,
       optional_webrtc_data_channel: true,
       webgl2_signal_renderer: true,
+      offscreen_canvas_signal_renderer: true,
+      minmax_signal_envelope: true,
+      gateway_clock_sync: true,
+      reliable_webrtc_control_channel: true,
+      persistent_operational_views: true,
+      sealed_session_manifest_sha256: true,
       browser_dsp_worker: true,
       synthetic_brain_simulations: true,
       nifti_volume_import: true,

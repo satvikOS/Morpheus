@@ -386,7 +386,13 @@ function Scene({
   );
 }
 
-export default function VisualLab({ compact = false }: { compact?: boolean }) {
+export default function VisualLab({
+  compact = false,
+  active = true,
+}: {
+  compact?: boolean;
+  active?: boolean;
+}) {
   const phantom = useMemo(() => generateVolumePhantom(64), []);
   const [mode, setMode] = useState<Mode>("volume");
   const [showGrid, setShowGrid] = useState(true);
@@ -681,7 +687,8 @@ export default function VisualLab({ compact = false }: { compact?: boolean }) {
 
         <Canvas
           key={sceneKey}
-          dpr={dpr}
+          frameloop={active ? "always" : "demand"}
+          dpr={active ? dpr : 1}
           gl={{
             antialias: quality === "uhd",
             powerPreference: "high-performance",

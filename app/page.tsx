@@ -185,7 +185,7 @@ export default function Home() {
                   Morpheus
                 </div>
                 <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">
-                  Research OS · v0.4
+                  Research OS · v0.5
                 </div>
               </div>
             </div>
@@ -297,6 +297,7 @@ export default function Home() {
             dropped={signal.dropped}
             sharedMemory={signal.sharedMemory}
             gateway={gateway}
+            clockSync={signal.clockSync}
           />
 
           <div
@@ -304,21 +305,26 @@ export default function Home() {
               view === "visual" ? "workstation-content-visual" : ""
             }`}
           >
-            {view === "workspace" ? (
+            <div
+              className={view === "workspace" ? "persistent-surface" : "persistent-surface persistent-surface-hidden"}
+              aria-hidden={view !== "workspace"}
+            >
               <WorkspacePanel
                 ring={signal.ring}
                 snapshots={channelSamples}
                 packetRate={signal.packetRate}
                 sourceMode={signal.sourceMode}
                 sourceName={signal.sourceName}
-                gateway={gateway}
                 status={status}
                 streams={streams}
                 latency={latency}
                 dropped={signal.dropped}
+                clockSync={signal.clockSync}
+                emitMarker={signal.emitMarker}
+                active={view === "workspace"}
                 onNavigate={setView}
               />
-            ) : null}
+            </div>
 
             {view === "overview" ? (
               <OverviewPanel
@@ -331,7 +337,10 @@ export default function Home() {
               />
             ) : null}
 
-            {view === "acquisition" ? (
+            <div
+              className={view === "acquisition" ? "persistent-surface" : "persistent-surface persistent-surface-hidden"}
+              aria-hidden={view !== "acquisition"}
+            >
               <AcquisitionPanel
                 status={status}
                 streams={streams}
@@ -350,13 +359,21 @@ export default function Home() {
                 dropped={signal.dropped}
                 transport={signal.transport}
                 sharedMemory={signal.sharedMemory}
+                active={view === "acquisition"}
               />
-            ) : null}
+            </div>
 
             {view === "dataset" ? <DatasetZeroPanel /> : null}
-            {view === "experiments" ? (
-              <ExperimentsPanel gateway={gateway} />
-            ) : null}
+            <div
+              className={view === "experiments" ? "persistent-surface" : "persistent-surface persistent-surface-hidden"}
+              aria-hidden={view !== "experiments"}
+            >
+              <ExperimentsPanel
+                gateway={gateway}
+                emitMarker={signal.emitMarker}
+                clockSync={signal.clockSync}
+              />
+            </div>
             {view === "programs" ? <ResearchProgramsPanel /> : null}
             {view === "models" ? (
               <ModelWorkersPanel
@@ -366,7 +383,12 @@ export default function Home() {
             ) : null}
             {view === "simulation" ? <SimulationPanel /> : null}
             {view === "public-data" ? <PublicDataPanel /> : null}
-            {view === "visual" ? <VisualLab /> : null}
+            <div
+              className={view === "visual" ? "persistent-surface" : "persistent-surface persistent-surface-hidden"}
+              aria-hidden={view !== "visual"}
+            >
+              <VisualLab active={view === "visual"} />
+            </div>
             {view === "system" ? (
               <SystemPanel
                 status={status}

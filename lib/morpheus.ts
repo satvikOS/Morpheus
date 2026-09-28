@@ -56,6 +56,9 @@ export type MarkerEvent = {
   source: "local" | "gateway";
   clock_domain?: string;
   wall_timestamp?: number;
+  timestamp_method?: string;
+  sync_uncertainty_ms?: number | null;
+  transport?: string;
 };
 
 export type PublicDataset = {

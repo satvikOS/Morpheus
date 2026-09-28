@@ -10,9 +10,14 @@ import {
   Radio,
   Send,
   ShieldCheck,
+  TimerReset,
 } from "lucide-react";
 import type { GatewayStatus, StreamInfo, WorkstationView } from "@/lib/morpheus";
-import type { SharedSignalRing } from "@/lib/use-signal-engine";
+import type {
+  ClockSyncState,
+  SharedSignalRing,
+  SignalEngineState,
+} from "@/lib/use-signal-engine";
 import SignalCanvas from "./signal-canvas";
 
 const VisualLab = dynamic(() => import("@/app/visual-lab"), {
@@ -28,11 +33,13 @@ export default function WorkspacePanel({
   packetRate,
   sourceMode,
   sourceName,
-  gateway,
   status,
   streams,
   latency,
   dropped,
+  clockSync,
+  emitMarker,
+  active,
   onNavigate,
 }: {
   ring: SharedSignalRing | null;
@@ -40,37 +47,39 @@ export default function WorkspacePanel({
   packetRate: number;
   sourceMode: "live" | "simulation" | "idle";
   sourceName: string;
-  gateway: string;
   status: GatewayStatus;
   streams: StreamInfo[];
   latency: number | null;
   dropped: number;
+  clockSync: ClockSyncState;
+  emitMarker: SignalEngineState["emitMarker"];
+  active: boolean;
   onNavigate: (view: WorkstationView) => void;
 }) {
   const [markerLabel, setMarkerLabel] = useState("AWAKE_REPORT");
   const [markerState, setMarkerState] = useState("READY");
   const [markerArmed, setMarkerArmed] = useState(false);
 
-  const emitMarker = async () => {
+  const primaryStream = streams[0];
+  const nominalRate =
+    Number(primaryStream?.nominal_srate || 0) || packetRate || 256;
+
+  const emit = async () => {
     if (markerState === "SENDING" || !markerArmed) return;
     setMarkerState("SENDING");
 
-    try {
-      const response = await fetch(`${gateway.replace(/\/$/, "")}/markers`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: markerLabel }),
-      });
+    const result = await emitMarker(markerLabel);
 
-      const payload = await response.json();
+    if (result.accepted) {
+      const method = result.marker?.timestamp_method;
       setMarkerState(
-        response.ok && payload.accepted
-          ? payload.lsl_emitted
-            ? "LSL ACK"
-            : "GATEWAY ACK"
-          : "FAILED",
+        result.transport === "webrtc-control"
+          ? method === "browser_event_mapped_to_gateway_clock"
+            ? "SYNC ACK"
+            : "ARRIVAL ACK"
+          : "HTTP ACK",
       );
-    } catch {
+    } else {
       setMarkerState("FAILED");
     }
 
@@ -78,8 +87,10 @@ export default function WorkspacePanel({
   };
 
   const channelCount =
-    streams.reduce((sum, stream) => sum + Number(stream.channel_count || 0), 0) ||
-    snapshots.length;
+    streams.reduce(
+      (sum, stream) => sum + Number(stream.channel_count || 0),
+      0,
+    ) || snapshots.length;
 
   return (
     <div className="workspace-board">
@@ -93,10 +104,13 @@ export default function WorkspacePanel({
         <SignalCanvas
           ring={ring}
           snapshots={snapshots}
-          packetRate={packetRate}
+          sampleRate={nominalRate}
           sourceMode={sourceMode}
           sourceName={sourceName}
+          channelLabels={primaryStream?.channel_labels || []}
+          channelUnit={primaryStream?.channel_units?.[0] || ""}
           compact
+          active={active}
         />
       </section>
 
@@ -108,7 +122,7 @@ export default function WorkspacePanel({
           action={() => onNavigate("visual")}
         />
         <div className="workspace-spatial-inner">
-          <VisualLab compact />
+          <VisualLab compact active={active} />
         </div>
       </section>
 
@@ -116,7 +130,7 @@ export default function WorkspacePanel({
         <PaneHeader
           icon={CircleDot}
           title="Experiment control"
-          subtitle="Authoritative marker path"
+          subtitle="Synchronized control path"
           action={() => onNavigate("experiments")}
         />
         <div className="workspace-control-body">
@@ -137,16 +151,19 @@ export default function WorkspacePanel({
               ),
             )}
           </div>
+
           <div className="workspace-action-row">
             <button
-              className={markerArmed ? "mode-pill mode-pill-live" : "mode-pill"}
+              className={
+                markerArmed ? "mode-pill mode-pill-live" : "mode-pill"
+              }
               onClick={() => setMarkerArmed((value) => !value)}
             >
               {markerArmed ? "MARKERS ARMED" : "ARM MARKERS"}
             </button>
             <button
               className="button-primary workspace-emit"
-              onClick={emitMarker}
+              onClick={emit}
               disabled={!markerArmed || markerState === "SENDING"}
             >
               <Send size={13} />
@@ -154,9 +171,21 @@ export default function WorkspacePanel({
             </button>
             <div className="workspace-marker-state">{markerState}</div>
           </div>
+
+          <div className="workspace-clock-line">
+            <TimerReset size={12} />
+            <span>
+              {clockSync.ready
+                ? `Gateway clock mapped · ±${clockSync.uncertaintyMs?.toFixed(2) ?? "—"} ms`
+                : "Gateway clock not synchronized"}
+            </span>
+          </div>
+
           <p className="workspace-footnote">
-            Browser click time is not used as the experimental timestamp. The gateway
-            assigns the authoritative arrival/LSL time.
+            The click event is timestamped on the browser monotonic clock and mapped
+            into the gateway clock domain before transmission when synchronization
+            quality is acceptable. Gateway arrival time is retained as a fallback,
+            not silently substituted.
           </p>
         </div>
       </section>
@@ -165,7 +194,7 @@ export default function WorkspacePanel({
         <PaneHeader
           icon={ShieldCheck}
           title="System health"
-          subtitle="Glanceable experiment-critical state"
+          subtitle="Experiment-critical state"
           action={() => onNavigate("system")}
         />
         <div className="workspace-health-grid">
@@ -174,16 +203,27 @@ export default function WorkspacePanel({
             value={status.status.toUpperCase()}
             good={status.status === "online"}
           />
-          <HealthCell label="Channels" value={String(channelCount)} good={channelCount > 0} />
           <HealthCell
-            label="Transport RTT"
+            label="Channels"
+            value={String(channelCount)}
+            good={channelCount > 0}
+          />
+          <HealthCell
+            label="Control RTT"
             value={latency === null ? "—" : `${latency} ms`}
             good={latency !== null && latency < 100}
           />
           <HealthCell
-            label="Packet rate"
-            value={packetRate ? `${packetRate}/s` : "—"}
-            good={packetRate > 0}
+            label="Clock uncertainty"
+            value={
+              clockSync.ready
+                ? `±${clockSync.uncertaintyMs?.toFixed(2) ?? "—"} ms`
+                : "UNSYNC"
+            }
+            good={
+              clockSync.ready &&
+              (clockSync.uncertaintyMs ?? Infinity) <= 5
+            }
           />
           <HealthCell
             label="Dropped"
@@ -205,8 +245,8 @@ export default function WorkspacePanel({
 
         <div className="workspace-health-note">
           <Radio size={13} />
-          Critical state remains visible beside acquisition and spatial work; it is no
-          longer buried in a separate diagnostics tab.
+          Critical transport, timing, and evidence state is duplicated in the
+          persistent global header so a pane cannot hide an acquisition fault.
         </div>
       </section>
     </div>
@@ -235,7 +275,11 @@ function PaneHeader({
           <div className="workspace-pane-subtitle">{subtitle}</div>
         </div>
       </div>
-      <button className="button-icon" onClick={action} title={`Open ${title}`}>
+      <button
+        className="button-icon"
+        onClick={action}
+        title={`Open ${title}`}
+      >
         <Maximize2 size={13} />
       </button>
     </div>
@@ -255,7 +299,9 @@ function HealthCell({
     <div className="workspace-health-cell">
       <div className="workspace-health-label">{label}</div>
       <div className="workspace-health-value">
-        <span className={good ? "health-dot health-dot-ok" : "health-dot"} />
+        <span
+          className={good ? "health-dot health-dot-ok" : "health-dot"}
+        />
         {value}
       </div>
     </div>

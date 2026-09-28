@@ -33,6 +33,7 @@ export default function AcquisitionPanel({
   dropped,
   transport,
   sharedMemory,
+  active,
 }: {
   status: GatewayStatus;
   streams: StreamInfo[];
@@ -51,12 +52,20 @@ export default function AcquisitionPanel({
   dropped: number;
   transport: string;
   sharedMemory: boolean;
+  active: boolean;
 }) {
   const discoveredChannels = streams.reduce(
     (sum, stream) => sum + Number(stream.channel_count || 0),
     0,
   );
   const visibleChannels = channelSamples.length || 0;
+  const selectedStream =
+    streams.find(
+      (stream) =>
+        (stream.source_id || stream.name) === selectedSourceId,
+    ) || streams[0];
+  const nominalSampleRate =
+    Number(selectedStream?.nominal_srate || 0) || sampleRate || 256;
   const rms = samples.length
     ? Math.sqrt(
         samples.reduce((sum, value) => sum + value * value, 0) /
@@ -125,7 +134,7 @@ export default function AcquisitionPanel({
                 ? "Simulation fallback"
                 : sourceName || "Signal monitor"
             }
-            description="The display layer is canvas/GPU driven. Time window, relative gain, polarity and montage controls update the renderer without changing the authoritative acquisition stream."
+            description="The signal scope is rendered by a dedicated OffscreenCanvas WebGL2 worker reading shared ring memory. Min/max envelope decimation preserves narrow transients when source density exceeds screen pixel density."
             action={
               <span
                 className={
@@ -143,9 +152,12 @@ export default function AcquisitionPanel({
           <SignalCanvas
             ring={ring}
             snapshots={channelSamples.length ? channelSamples : samples.length ? [samples] : []}
-            packetRate={sampleRate}
+            sampleRate={nominalSampleRate}
             sourceMode={sourceMode}
             sourceName={sourceName}
+            channelLabels={selectedStream?.channel_labels || []}
+            channelUnit={selectedStream?.channel_units?.[0] || ""}
+            active={active}
           />
         </Panel>
 

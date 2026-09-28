@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { CircleDot, DatabaseBackup, Pause, Play, Plus, Send, TimerReset } from "lucide-react";
 import type { MarkerEvent } from "@/lib/morpheus";
+import type { ClockSyncState, SignalEngineState } from "@/lib/use-signal-engine";
 import { Panel, SectionHeader } from "./ui";
 
 const milestones = [
@@ -14,7 +15,15 @@ const milestones = [
   { id: "M5", title: "Individual atlas", status: "RESEARCH", body: "Subject-specific alignment across perception, imagery, sleep, and session boundaries." },
 ];
 
-export default function ExperimentsPanel({ gateway }: { gateway: string }) {
+export default function ExperimentsPanel({
+  gateway,
+  emitMarker,
+  clockSync,
+}: {
+  gateway: string;
+  emitMarker: SignalEngineState["emitMarker"];
+  clockSync: ClockSyncState;
+}) {
   const [events, setEvents] = useState<MarkerEvent[]>([]);
   const [label, setLabel] = useState("AWAKE_REPORT");
   const [sending, setSending] = useState(false);
@@ -27,6 +36,8 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
     samples?: number;
     markers?: number;
     path?: string | null;
+    manifest_path?: string | null;
+    sha256?: string | null;
   }>({ enabled: false, active: false });
   const [recordingBusy, setRecordingBusy] = useState(false);
 
@@ -76,34 +87,20 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
     if (!markerLabel || sending || !armed) return;
 
     setSending(true);
-    let event: MarkerEvent = {
+    const result = await emitMarker(markerLabel);
+    const marker = result.marker;
+
+    const event: MarkerEvent = {
       id: crypto.randomUUID(),
       label: markerLabel,
-      timestamp: Date.now() / 1000,
-      source: "local",
-      clock_domain: "browser_untrusted",
+      timestamp: Number(marker?.timestamp || Date.now() / 1000),
+      wall_timestamp: marker?.wall_timestamp,
+      source: result.accepted ? "gateway" : "local",
+      clock_domain: marker?.clock_domain || "browser_untrusted",
+      timestamp_method: marker?.timestamp_method,
+      sync_uncertainty_ms: marker?.sync_uncertainty_ms,
+      transport: result.transport,
     };
-
-    try {
-      const response = await fetch(`${gateway.replace(/\/$/, "")}/markers`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: markerLabel }),
-      });
-
-      if (response.ok) {
-        const payload = await response.json();
-        const marker = payload.marker || {};
-        event = {
-          id: crypto.randomUUID(),
-          label: markerLabel,
-          timestamp: Number(marker.timestamp || Date.now() / 1000),
-          wall_timestamp: Number(marker.wall_timestamp || 0) || undefined,
-          source: "gateway",
-          clock_domain: String(marker.clock_domain || "gateway"),
-        };
-      }
-    } catch {}
 
     setEvents((current) => [event, ...current].slice(0, 40));
     setSending(false);
@@ -160,7 +157,7 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
               className="button-primary w-full disabled:cursor-not-allowed disabled:opacity-40"
             >
               {recording.active ? <Pause size={13} /> : <DatabaseBackup size={13} />}
-              {recordingBusy ? "Updating..." : recording.active ? "Stop local recording" : "Start local recording"}
+              {recordingBusy ? "Updating..." : recording.active ? "Stop and seal recording" : "Start local recording"}
             </button>
             <div className="grid grid-cols-2 gap-2">
               <div className="rounded-lg border border-white/[.06] bg-black/15 p-3">
@@ -184,7 +181,7 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
           <SectionHeader
             eyebrow="Synchronized events"
             title="Marker console"
-            description="Arm the marker plane before a trial. During an armed session, marker actions stay one-click so the operator does not lose timing; the gateway, not the browser clock, assigns the authoritative timestamp."
+            description="Arm the marker plane before a trial. Morpheus continuously estimates browser-to-gateway clock offset; the event time is mapped into the gateway clock domain before transport when measured uncertainty is acceptable, while gateway arrival remains the fallback."
             action={
               <button
                 onClick={() => setArmed((value) => !value)}
@@ -217,7 +214,9 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
               <Send size={13} /> {sending ? "Sending..." : armed ? "Emit marker" : "Arm marker plane first"}
             </button>
             <div className="operator-note">
-              Gateway acknowledgements carry the authoritative LSL/system clock domain. If the gateway is unreachable, Morpheus records only an explicitly untrusted local UI event.
+              Clock sync: {clockSync.ready
+                ? `±${clockSync.uncertaintyMs?.toFixed(2) ?? "—"} ms · ${clockSync.clockDomain}`
+                : "not synchronized"}. WebRTC control is preferred; HTTP is the fallback. Hardware triggers remain the reference when a protocol needs tighter timing than the measured uncertainty.
             </div>
           </div>
         </Panel>

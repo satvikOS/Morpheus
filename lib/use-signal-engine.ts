@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { buildWebSocketUrl } from "@/lib/morpheus";
 
 export type SharedSignalRing = {
@@ -8,6 +14,30 @@ export type SharedSignalRing = {
   control: Int32Array;
   capacity: number;
   maxChannels: number;
+};
+
+export type ClockSyncState = {
+  ready: boolean;
+  offsetSeconds: number;
+  rttMs: number | null;
+  uncertaintyMs: number | null;
+  clockDomain: string;
+  sampledAt: number | null;
+};
+
+export type MarkerEmitResult = {
+  accepted: boolean;
+  lsl_emitted?: boolean;
+  transport: "webrtc-control" | "http" | "local-failed";
+  marker?: {
+    sequence?: number;
+    label?: string;
+    timestamp?: number;
+    wall_timestamp?: number;
+    clock_domain?: string;
+    timestamp_method?: string;
+    sync_uncertainty_ms?: number | null;
+  };
 };
 
 export type SignalEngineState = {
@@ -19,6 +49,11 @@ export type SignalEngineState = {
   dropped: number;
   transport: string;
   sharedMemory: boolean;
+  clockSync: ClockSyncState;
+  emitMarker: (
+    label: string,
+    payload?: Record<string, unknown>,
+  ) => Promise<MarkerEmitResult>;
 };
 
 const CONTROL = {
@@ -36,6 +71,12 @@ const MAX_CHANNELS = 32;
 const CAPACITY = 32768;
 const SNAPSHOT_SAMPLES = 1024;
 
+type PendingMarker = {
+  resolve: (value: MarkerEmitResult) => void;
+  reject: (reason?: unknown) => void;
+  timer: number;
+};
+
 export function useSignalEngine(
   gateway: string,
   selectedSourceId: string,
@@ -48,11 +89,23 @@ export function useSignalEngine(
   const [dropped, setDropped] = useState(0);
   const [transport, setTransport] = useState("initializing");
   const [snapshots, setSnapshots] = useState<number[][]>([]);
+  const [clockSync, setClockSync] = useState<ClockSyncState>({
+    ready: false,
+    offsetSeconds: 0,
+    rttMs: null,
+    uncertaintyMs: null,
+    clockDomain: "unsynchronized",
+    sampledAt: null,
+  });
+
+  const controlChannelRef = useRef<RTCDataChannel | null>(null);
+  const pendingMarkers = useRef(new Map<string, PendingMarker>());
 
   const ring = useMemo<SharedSignalRing | null>(() => {
     if (
       typeof window === "undefined" ||
-      typeof SharedArrayBuffer === "undefined"
+      typeof SharedArrayBuffer === "undefined" ||
+      !globalThis.crossOriginIsolated
     ) {
       return null;
     }
@@ -77,82 +130,155 @@ export function useSignalEngine(
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const synchronize = async (samplesPerRound: number) => {
+      const candidates: Array<{
+        offsetSeconds: number;
+        rttMs: number;
+        clockDomain: string;
+      }> = [];
+
+      for (let index = 0; index < samplesPerRound; index += 1) {
+        if (cancelled) return;
+
+        const t0 = performance.now() / 1000;
+        try {
+          const response = await fetch(
+            `${gateway.replace(/\/$/, "")}/clock?nonce=${crypto.randomUUID()}`,
+            { cache: "no-store" },
+          );
+          const t1 = performance.now() / 1000;
+
+          if (response.ok) {
+            const payload = await response.json();
+            const remote = Number(payload.clock_time);
+            if (Number.isFinite(remote)) {
+              candidates.push({
+                offsetSeconds: remote - (t0 + t1) / 2,
+                rttMs: (t1 - t0) * 1000,
+                clockDomain: String(payload.clock_domain || "gateway_clock"),
+              });
+            }
+          }
+        } catch {}
+
+        if (index + 1 < samplesPerRound) {
+          await new Promise((resolve) => window.setTimeout(resolve, 35));
+        }
+      }
+
+      if (!candidates.length || cancelled) {
+        setClockSync((current) => ({
+          ...current,
+          ready: false,
+          rttMs: null,
+          uncertaintyMs: null,
+        }));
+        return;
+      }
+
+      candidates.sort((a, b) => a.rttMs - b.rttMs);
+      const best = candidates.slice(0, Math.min(3, candidates.length));
+      const offsets = best
+        .map((candidate) => candidate.offsetSeconds)
+        .sort((a, b) => a - b);
+      const medianOffset = offsets[Math.floor(offsets.length / 2)];
+      const spreadMs =
+        offsets.length > 1
+          ? (offsets[offsets.length - 1] - offsets[0]) * 1000
+          : 0;
+      const bestRtt = best[0].rttMs;
+      const uncertaintyMs = Math.max(bestRtt / 2, spreadMs / 2);
+
+      setClockSync({
+        ready: true,
+        offsetSeconds: medianOffset,
+        rttMs: bestRtt,
+        uncertaintyMs,
+        clockDomain: best[0].clockDomain,
+        sampledAt: Date.now(),
+      });
+    };
+
+    void synchronize(7);
+    const timer = window.setInterval(() => void synchronize(4), 10000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [gateway, connectionEpoch]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
     let cancelled = false;
     let worker: Worker | null = null;
     let peer: RTCPeerConnection | null = null;
-    let dataChannel: RTCDataChannel | null = null;
-    let webrtcPackets = 0;
-    let webrtcActive = false;
-
+    let sampleChannel: RTCDataChannel | null = null;
+    let controlChannel: RTCDataChannel | null = null;
     const fallbackHistory = Array.from(
       { length: MAX_CHANNELS },
       () => [] as number[],
     );
 
-    const clearRing = () => {
-      if (!ring) return;
+    if (ring) {
       ring.control.fill(0);
       ring.data.fill(0);
-    };
+    }
 
-    const incrementDropped = () => {
-      if (ring) {
-        setDropped(Atomics.add(ring.control, CONTROL.DROPPED, 1) + 1);
-      } else {
-        setDropped((value) => value + 1);
-      }
-    };
+    worker = new Worker("/workers/stream-worker.js");
+    worker.postMessage({
+      type: "init",
+      maxChannels: MAX_CHANNELS,
+      capacity: CAPACITY,
+      dataBuffer: ring?.data.buffer,
+      controlBuffer: ring?.control.buffer,
+    });
 
-    const writeFrame = (
-      values: number[],
-      timestamp: number,
-      simulated: boolean,
-      name: string,
-    ) => {
-      const bounded = values.slice(0, MAX_CHANNELS);
-      if (!bounded.length) return;
+    worker.onmessage = (event) => {
+      const message = event.data || {};
 
-      if (ring) {
-        const writeIndex = Atomics.load(ring.control, CONTROL.WRITE_INDEX);
-        const base = writeIndex * MAX_CHANNELS;
-
-        for (let channel = 0; channel < MAX_CHANNELS; channel += 1) {
-          const value = channel < bounded.length ? Number(bounded[channel]) : 0;
-          ring.data[base + channel] = Number.isFinite(value) ? value : 0;
+      if (message.type === "metrics") {
+        setPacketRate(Number(message.packetRate || 0));
+        setDropped(Number(message.dropped || 0));
+        if (message.sourceName) setSourceName(String(message.sourceName));
+        if (message.simulated) {
+          setSourceMode("simulation");
+        } else if (message.state === 2) {
+          setSourceMode("live");
         }
+        return;
+      }
 
-        Atomics.store(ring.control, CONTROL.CHANNELS, bounded.length);
-        Atomics.store(ring.control, CONTROL.SIMULATED, simulated ? 1 : 0);
-        Atomics.store(
-          ring.control,
-          CONTROL.LAST_TS_MS,
-          Math.floor(timestamp * 1000) & 0x7fffffff,
-        );
-        Atomics.add(ring.control, CONTROL.TOTAL_FRAMES, 1);
-        Atomics.store(
-          ring.control,
-          CONTROL.WRITE_INDEX,
-          (writeIndex + 1) % CAPACITY,
-        );
-      } else {
-        bounded.forEach((value, index) => {
+      if (message.type === "transport") {
+        setTransport(String(message.transport || "unknown"));
+        if (message.state === "simulation") setSourceMode("simulation");
+        if (message.state === "offline") setSourceMode("idle");
+        if (message.state === "online" && message.transport === "webrtc-datachannel") {
+          setSourceMode("live");
+        }
+        return;
+      }
+
+      if (message.type === "frame" && Array.isArray(message.channels)) {
+        const values = message.channels.slice(0, MAX_CHANNELS).map(Number);
+        values.forEach((value: number, index: number) => {
           const history = fallbackHistory[index];
-          history.push(Number(value) || 0);
+          history.push(Number.isFinite(value) ? value : 0);
           if (history.length > SNAPSHOT_SAMPLES) {
             history.splice(0, history.length - SNAPSHOT_SAMPLES);
           }
         });
-      }
 
-      setSourceName(name || "Unknown stream");
-      setSourceMode(simulated ? "simulation" : "live");
+        setSourceName(String(message.sourceName || "Fallback stream"));
+        setSourceMode(message.simulated ? "simulation" : "live");
+      }
     };
 
-    const startWorkerTransport = () => {
-      if (cancelled || worker) return;
-
+    const startWorkerWebSocket = () => {
+      if (cancelled || !worker) return;
       const sourceQuery = selectedSourceId
         ? `?source_id=${encodeURIComponent(selectedSourceId)}`
         : "";
@@ -160,101 +286,79 @@ export function useSignalEngine(
         gateway,
         `/ws/samples${sourceQuery}`,
       );
-
-      worker = new Worker("/workers/stream-worker.js");
-
-      worker.onmessage = (event) => {
-        const message = event.data || {};
-
-        if (message.type === "metrics") {
-          setPacketRate(Number(message.packetRate || 0));
-          setDropped(Number(message.dropped || 0));
-          if (message.sourceName) setSourceName(String(message.sourceName));
-          if (message.simulated) {
-            setSourceMode("simulation");
-          } else if (message.state === 2) {
-            setSourceMode("live");
-          }
-          return;
-        }
-
-        if (message.type === "transport") {
-          setTransport(String(message.transport || "unknown"));
-          if (message.state === "simulation") setSourceMode("simulation");
-          if (message.state === "offline") setSourceMode("idle");
-          return;
-        }
-
-        if (message.type === "frame" && Array.isArray(message.channels)) {
-          writeFrame(
-            message.channels.map(Number),
-            Number(message.timestamp || Date.now() / 1000),
-            Boolean(message.simulated),
-            String(message.sourceName || "Fallback stream"),
-          );
-        }
-      };
-
-      worker.postMessage({
-        type: "connect",
-        url,
-        maxChannels: MAX_CHANNELS,
-        capacity: CAPACITY,
-        dataBuffer: ring?.data.buffer,
-        controlBuffer: ring?.control.buffer,
-      });
+      worker.postMessage({ type: "connect-websocket", url });
     };
 
     const tryWebRTC = async () => {
-      if (!("RTCPeerConnection" in window)) return false;
+      if (!("RTCPeerConnection" in window) || !worker) return false;
 
       try {
         peer = new RTCPeerConnection({ iceServers: [] });
-        dataChannel = peer.createDataChannel("morpheus-samples", {
+
+        sampleChannel = peer.createDataChannel("morpheus-samples", {
           ordered: false,
           maxRetransmits: 0,
         });
+        controlChannel = peer.createDataChannel("morpheus-control", {
+          ordered: true,
+        });
 
-        dataChannel.binaryType = "arraybuffer";
+        sampleChannel.binaryType = "arraybuffer";
 
-        dataChannel.onmessage = (event) => {
-          try {
-            const packet =
-              typeof event.data === "string"
-                ? JSON.parse(event.data)
-                : JSON.parse(new TextDecoder().decode(event.data));
+        sampleChannel.onmessage = (event) => {
+          if (!worker || cancelled) return;
 
-            const channels = Array.isArray(packet.channels)
-              ? packet.channels.map(Number)
-              : [];
-            writeFrame(
-              channels,
-              Number(packet.ts || Date.now() / 1000),
-              Boolean(packet.simulated),
-              String(packet.stream || "WebRTC stream"),
+          if (event.data instanceof ArrayBuffer) {
+            worker.postMessage(
+              { type: "webrtc-packet", payload: event.data },
+              [event.data],
             );
-            webrtcPackets += 1;
-          } catch {
-            incrementDropped();
+          } else {
+            worker.postMessage({
+              type: "webrtc-packet",
+              payload: event.data,
+            });
           }
+        };
+
+        controlChannel.onmessage = (event) => {
+          try {
+            const message = JSON.parse(String(event.data));
+            if (message.type !== "marker_ack" || !message.request_id) return;
+            const pending = pendingMarkers.current.get(message.request_id);
+            if (!pending) return;
+
+            window.clearTimeout(pending.timer);
+            pendingMarkers.current.delete(message.request_id);
+            pending.resolve({
+              accepted: Boolean(message.accepted),
+              lsl_emitted: Boolean(message.lsl_emitted),
+              marker: message.marker,
+              transport: "webrtc-control",
+            });
+          } catch {}
         };
 
         const offer = await peer.createOffer();
         await peer.setLocalDescription(offer);
         await waitForIceGathering(peer, 1300);
 
-        const endpoint = `${gateway.replace(/\/$/, "")}/webrtc/offer`;
-        const response = await fetch(endpoint, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            sdp: peer.localDescription?.sdp,
-            type: peer.localDescription?.type || "offer",
-            source_id: selectedSourceId || null,
-          }),
-        });
+        const response = await fetch(
+          `${gateway.replace(/\/$/, "")}/webrtc/offer`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              sdp: peer.localDescription?.sdp,
+              type: peer.localDescription?.type || "offer",
+              source_id: selectedSourceId || null,
+            }),
+          },
+        );
 
-        if (!response.ok) throw new Error(`WebRTC signaling failed: ${response.status}`);
+        if (!response.ok) {
+          throw new Error(`WebRTC signaling failed: ${response.status}`);
+        }
 
         const answer = await response.json();
         if (!answer.available || !answer.sdp) {
@@ -266,65 +370,64 @@ export function useSignalEngine(
           type: answer.type || "answer",
         });
 
-        await waitForDataChannel(dataChannel, 2500);
+        await Promise.all([
+          waitForDataChannel(sampleChannel, 2500),
+          waitForDataChannel(controlChannel, 2500),
+        ]);
+
         if (cancelled) return false;
 
-        webrtcActive = true;
+        controlChannelRef.current = controlChannel;
         setTransport("webrtc-datachannel");
-        if (ring) Atomics.store(ring.control, CONTROL.STATE, 2);
 
-        dataChannel.onclose = () => {
+        if (ring) {
+          Atomics.store(ring.control, CONTROL.STATE, 2);
+        }
+
+        sampleChannel.onclose = () => {
           if (cancelled) return;
-          webrtcActive = false;
+          controlChannelRef.current = null;
           setTransport("webrtc-closed");
           setSourceMode("idle");
-          startWorkerTransport();
-        };
-
-        dataChannel.onerror = () => {
-          if (cancelled) return;
-          incrementDropped();
+          startWorkerWebSocket();
         };
 
         return true;
       } catch {
         try {
-          dataChannel?.close();
+          sampleChannel?.close();
+          controlChannel?.close();
           peer?.close();
         } catch {}
-        dataChannel = null;
-        peer = null;
+
+        controlChannelRef.current = null;
         return false;
       }
     };
 
-    clearRing();
     setTransport("negotiating");
 
     void (async () => {
       const connected = await tryWebRTC();
-      if (!connected && !cancelled) {
-        startWorkerTransport();
-      }
+      if (!connected && !cancelled) startWorkerWebSocket();
     })();
-
-    const rateTimer = window.setInterval(() => {
-      if (webrtcActive) {
-        setPacketRate(webrtcPackets);
-        if (ring) Atomics.store(ring.control, CONTROL.PACKET_RATE, webrtcPackets);
-        webrtcPackets = 0;
-      }
-    }, 1000);
 
     const snapshotTimer = window.setInterval(() => {
       if (ring) {
         const channels = Math.max(
           0,
-          Math.min(MAX_CHANNELS, Atomics.load(ring.control, CONTROL.CHANNELS)),
+          Math.min(
+            MAX_CHANNELS,
+            Atomics.load(ring.control, CONTROL.CHANNELS),
+          ),
         );
         const writeIndex = Atomics.load(ring.control, CONTROL.WRITE_INDEX);
         const totalFrames = Atomics.load(ring.control, CONTROL.TOTAL_FRAMES);
-        const count = Math.min(SNAPSHOT_SAMPLES, totalFrames, CAPACITY);
+        const count = Math.min(
+          SNAPSHOT_SAMPLES,
+          totalFrames,
+          CAPACITY,
+        );
 
         if (channels > 0 && count > 0) {
           const start = (writeIndex - count + CAPACITY) % CAPACITY;
@@ -332,20 +435,27 @@ export function useSignalEngine(
             const values = new Array<number>(count);
             for (let index = 0; index < count; index += 1) {
               const frame = (start + index) % CAPACITY;
-              values[index] = ring.data[frame * MAX_CHANNELS + channel];
+              values[index] =
+                ring.data[frame * MAX_CHANNELS + channel];
             }
             return values;
           });
           setSnapshots(next);
         }
 
-        if (!webrtcActive) {
-          setPacketRate(Atomics.load(ring.control, CONTROL.PACKET_RATE));
-        }
-        setDropped(Atomics.load(ring.control, CONTROL.DROPPED));
-        const simulated = Atomics.load(ring.control, CONTROL.SIMULATED) === 1;
+        setPacketRate(
+          Atomics.load(ring.control, CONTROL.PACKET_RATE),
+        );
+        setDropped(
+          Atomics.load(ring.control, CONTROL.DROPPED),
+        );
+
+        const simulated =
+          Atomics.load(ring.control, CONTROL.SIMULATED) === 1;
         const state = Atomics.load(ring.control, CONTROL.STATE);
-        setSourceMode(simulated ? "simulation" : state === 2 ? "live" : "idle");
+
+        if (simulated) setSourceMode("simulation");
+        else if (state === 2) setSourceMode("live");
       } else {
         const next = fallbackHistory
           .filter((history) => history.length)
@@ -358,12 +468,86 @@ export function useSignalEngine(
       cancelled = true;
       worker?.postMessage({ type: "disconnect" });
       worker?.terminate();
-      dataChannel?.close();
+
+      controlChannelRef.current = null;
+      sampleChannel?.close();
+      controlChannel?.close();
       peer?.close();
-      window.clearInterval(rateTimer);
+
       window.clearInterval(snapshotTimer);
     };
   }, [gateway, selectedSourceId, connectionEpoch, ring]);
+
+  const emitMarker = useCallback(
+    async (
+      label: string,
+      payload: Record<string, unknown> = {},
+    ): Promise<MarkerEmitResult> => {
+      const markerLabel = label.trim().toUpperCase();
+      if (!markerLabel) {
+        return {
+          accepted: false,
+          transport: "local-failed",
+        };
+      }
+
+      const clientMonotonic = performance.now() / 1000;
+      const requestId = crypto.randomUUID();
+      const markerRequest = {
+        type: "marker",
+        request_id: requestId,
+        label: markerLabel,
+        payload,
+        client_monotonic: clientMonotonic,
+        client_clock_domain: "browser_performance",
+        estimated_gateway_time: clockSync.ready
+          ? clientMonotonic + clockSync.offsetSeconds
+          : null,
+        sync_uncertainty_ms: clockSync.uncertaintyMs,
+      };
+
+      const channel = controlChannelRef.current;
+
+      if (channel?.readyState === "open") {
+        return new Promise<MarkerEmitResult>((resolve, reject) => {
+          const timer = window.setTimeout(() => {
+            pendingMarkers.current.delete(requestId);
+            reject(new Error("Marker acknowledgement timeout"));
+          }, 1500);
+
+          pendingMarkers.current.set(requestId, {
+            resolve,
+            reject,
+            timer,
+          });
+
+          try {
+            channel.send(JSON.stringify(markerRequest));
+          } catch (error) {
+            window.clearTimeout(timer);
+            pendingMarkers.current.delete(requestId);
+            reject(error);
+          }
+        }).catch(async () =>
+          emitMarkerHttp(gateway, markerRequest),
+        );
+      }
+
+      return emitMarkerHttp(gateway, markerRequest);
+    },
+    [gateway, clockSync],
+  );
+
+  useEffect(
+    () => () => {
+      for (const pending of pendingMarkers.current.values()) {
+        window.clearTimeout(pending.timer);
+        pending.reject(new Error("Signal engine stopped"));
+      }
+      pendingMarkers.current.clear();
+    },
+    [],
+  );
 
   return {
     ring,
@@ -373,8 +557,40 @@ export function useSignalEngine(
     sourceMode,
     dropped,
     transport,
-    sharedMemory: Boolean(ring && globalThis.crossOriginIsolated),
+    sharedMemory: Boolean(ring),
+    clockSync,
+    emitMarker,
   };
+}
+
+async function emitMarkerHttp(
+  gateway: string,
+  markerRequest: Record<string, unknown>,
+): Promise<MarkerEmitResult> {
+  try {
+    const response = await fetch(
+      `${gateway.replace(/\/$/, "")}/markers`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(markerRequest),
+      },
+    );
+
+    const payload = await response.json();
+
+    return {
+      accepted: response.ok && Boolean(payload.accepted),
+      lsl_emitted: Boolean(payload.lsl_emitted),
+      marker: payload.marker,
+      transport: "http",
+    };
+  } catch {
+    return {
+      accepted: false,
+      transport: "local-failed",
+    };
+  }
 }
 
 async function waitForIceGathering(
@@ -388,7 +604,10 @@ async function waitForIceGathering(
 
     function done() {
       window.clearTimeout(timer);
-      peer.removeEventListener("icegatheringstatechange", onChange);
+      peer.removeEventListener(
+        "icegatheringstatechange",
+        onChange,
+      );
       resolve();
     }
 
@@ -396,7 +615,10 @@ async function waitForIceGathering(
       if (peer.iceGatheringState === "complete") done();
     }
 
-    peer.addEventListener("icegatheringstatechange", onChange);
+    peer.addEventListener(
+      "icegatheringstatechange",
+      onChange,
+    );
   });
 }
 
