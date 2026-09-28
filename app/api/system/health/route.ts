@@ -47,11 +47,15 @@ export async function GET(request: NextRequest) {
 
   return Response.json({
     service: "morpheus-workstation",
-    version: "0.3.0",
+    version: "0.4.0",
     ok: probes.every((item) => item.ok),
     probes,
     capabilities: {
       multichannel_ring_buffers: true,
+      shared_array_buffer_signal_path: true,
+      worker_owned_websocket: true,
+      optional_webrtc_data_channel: true,
+      webgl2_signal_renderer: true,
       browser_dsp_worker: true,
       synthetic_brain_simulations: true,
       nifti_volume_import: true,
@@ -59,6 +63,8 @@ export async function GET(request: NextRequest) {
       multiplanar_slices: true,
       public_neurodata_fabric: true,
       dataset_zero_local_hashing: true,
+      dataset_zero_indexeddb: true,
+      marker_gateway_clock_authority: true,
       m0_m5_program_registry: true,
       local_lsl_gateway: true,
     },
