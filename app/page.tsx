@@ -1,164 +1,291 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, BrainCircuit, Database, FlaskConical, Gauge, Radio,
-  ScanLine, ShieldCheck, Waves, Boxes, Network, Cpu, Clock3
+  Activity,
+  BrainCircuit,
+  Database,
+  FlaskConical,
+  Gauge,
+  LayoutDashboard,
+  Radio,
+  ScanSearch,
+  Settings2,
+  Sparkles,
+  Waves,
 } from "lucide-react";
+import AcquisitionPanel from "@/components/workstation/acquisition-panel";
+import DatasetZeroPanel from "@/components/workstation/dataset-zero-panel";
+import ExperimentsPanel from "@/components/workstation/experiments-panel";
+import OverviewPanel from "@/components/workstation/overview-panel";
+import PublicDataPanel from "@/components/workstation/public-data-panel";
+import SystemPanel from "@/components/workstation/system-panel";
+import type { GatewayStatus, SamplePacket, StreamInfo, WorkstationView } from "@/lib/morpheus";
+import { buildWebSocketUrl } from "@/lib/morpheus";
 
-const Scene3D = dynamic(() => import("./visual-lab"), { ssr: false });
+const VisualLab = dynamic(() => import("./visual-lab"), {
+  ssr: false,
+  loading: () => <div className="panel flex min-h-[720px] items-center justify-center rounded-2xl text-xs text-slate-600">Initializing WebGL workspace…</div>,
+});
 
-type GatewayStatus={status:"online"|"offline";streams:number;timestamp:string};
-type Stream={name:string;type:string;channel_count:number;nominal_srate:number;source_id:string};
-type SamplePacket={stream:string;ts:number;channels:number[]};
-type MetricCard={Icon:LucideIcon;label:string;value:string|number};
-type Subsystem={Icon:LucideIcon;label:string};
+const DEFAULT_GATEWAY = process.env.NEXT_PUBLIC_MORPHEUS_GATEWAY_URL || "/api/signal-gateway";
 
-const cards=[
-  ["Acquisition","Native LSL / BrainFlow streams",Radio],
-  ["Dataset Zero","Immutable dream + event records",Database],
-  ["Neural Atlas","Representation learning workspace",BrainCircuit],
-  ["Protocols","Timestamped experiment control",FlaskConical]
-] as const;
+type NavItem = {
+  id: WorkstationView;
+  label: string;
+  icon: LucideIcon;
+  hint: string;
+};
 
-function Sparkline({values}:{values:number[]}) {
-  const points=values.length?values:Array.from({length:64},(_,i)=>Math.sin(i/5)*0.35+Math.sin(i/2.8)*0.12);
-  const path=points.map((v,i)=>`${(i/(points.length-1))*100},${50-v*34}`).join(" ");
-  return <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full">
-    <polyline fill="none" stroke="currentColor" strokeWidth="1.3" points={path}/>
-  </svg>;
+const navItems: NavItem[] = [
+  { id: "overview", label: "Overview", icon: LayoutDashboard, hint: "Command layer" },
+  { id: "acquisition", label: "Acquisition", icon: Radio, hint: "Live signals" },
+  { id: "dataset", label: "Dataset Zero", icon: Database, hint: "Ground truth" },
+  { id: "experiments", label: "Experiments", icon: FlaskConical, hint: "Protocols" },
+  { id: "public-data", label: "Public Data", icon: ScanSearch, hint: "Open archives" },
+  { id: "visual", label: "3D Space", icon: Sparkles, hint: "Spatial work" },
+  { id: "system", label: "System", icon: Settings2, hint: "Diagnostics" },
+];
+
+function endpoint(base: string, path: string) {
+  return `${base.replace(/\/$/, "")}${path}`;
 }
 
-export default function Home(){
-  const gateway=process.env.NEXT_PUBLIC_MORPHEUS_GATEWAY_URL??"http://localhost:8787";
-  const [status,setStatus]=useState<GatewayStatus>({status:"offline",streams:0,timestamp:""});
-  const [streams,setStreams]=useState<Stream[]>([]);
-  const [samples,setSamples]=useState<number[]>([]);
-  const [latency,setLatency]=useState<number|null>(null);
-  const [activeTab,setActiveTab]=useState<"monitor"|"visual">("monitor");
-  const lastTs=useRef<number|null>(null);
+export default function Home() {
+  const [view, setView] = useState<WorkstationView>("overview");
+  const [gateway, setGatewayState] = useState(DEFAULT_GATEWAY);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const [status, setStatus] = useState<GatewayStatus>({ status: "offline", streams: 0, timestamp: "" });
+  const [streams, setStreams] = useState<StreamInfo[]>([]);
+  const [samples, setSamples] = useState<number[]>([]);
+  const [latency, setLatency] = useState<number | null>(null);
+  const [sampleRate, setSampleRate] = useState(0);
+  const [sourceMode, setSourceMode] = useState<"live" | "simulation" | "idle">("idle");
+  const [sourceName, setSourceName] = useState("");
+  const packetCount = useRef(0);
+  const lastMessageAt = useRef(0);
 
-  useEffect(()=>{
-    let active=true;
-    const poll=async()=>{
-      const t0=performance.now();
-      try{
-        const [health,streamData]=await Promise.all([
-          fetch(`${gateway}/health`,{cache:"no-store"}).then(r=>r.json()),
-          fetch(`${gateway}/streams`,{cache:"no-store"}).then(r=>r.json())
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("morpheus.gateway");
+      if (saved) setGatewayState(saved);
+    } catch {}
+  }, []);
+
+  const setGateway = (value: string) => {
+    setGatewayState(value);
+    try { localStorage.setItem("morpheus.gateway", value); } catch {}
+  };
+
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      const started = performance.now();
+      try {
+        const [healthResponse, streamsResponse] = await Promise.all([
+          fetch(endpoint(gateway, "/health"), { cache: "no-store" }),
+          fetch(endpoint(gateway, "/streams"), { cache: "no-store" }),
         ]);
-        if(active){setStatus(health);setStreams(streamData.streams??[]);setLatency(Math.round(performance.now()-t0));}
-      }catch{
-        if(active){setStatus({status:"offline",streams:0,timestamp:new Date().toISOString()});setStreams([]);setLatency(null);}
+        if (!healthResponse.ok || !streamsResponse.ok) throw new Error("Gateway unavailable");
+        const health = await healthResponse.json() as GatewayStatus;
+        const streamPayload = await streamsResponse.json() as { streams?: StreamInfo[] };
+        if (active) {
+          setStatus(health);
+          setStreams(streamPayload.streams ?? []);
+          setLatency(Math.round(performance.now() - started));
+        }
+      } catch {
+        if (active) {
+          setStatus({ status: "offline", streams: 0, timestamp: new Date().toISOString() });
+          setStreams([]);
+          setLatency(null);
+        }
       }
     };
-    poll();
-    const timer=setInterval(poll,2200);
-    return()=>{active=false;clearInterval(timer)};
-  },[gateway]);
 
-  useEffect(()=>{
-    const wsBase=gateway.replace(/^http/,"ws");
-    let ws:WebSocket|undefined;
-    let reconnect:number|undefined;
-    const connect=()=>{
-      try{
-        ws=new WebSocket(`${wsBase}/ws/samples`);
-        ws.onmessage=(event)=>{
-          const packet=JSON.parse(event.data) as SamplePacket;
-          if(packet.channels?.length){
-            setSamples(prev=>[...prev,packet.channels[0]].slice(-160));
-            lastTs.current=packet.ts;
-          }
-        };
-        ws.onclose=()=>{reconnect=window.setTimeout(connect,1500);};
-        ws.onerror=()=>ws?.close();
-      }catch{}
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
     };
+  }, [gateway, connectionEpoch]);
+
+  useEffect(() => {
+    let ws: WebSocket | undefined;
+    let reconnectTimer: number | undefined;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      try {
+        ws = new WebSocket(buildWebSocketUrl(gateway, "/ws/samples"));
+        ws.onmessage = (event) => {
+          try {
+            const packet = JSON.parse(event.data) as SamplePacket;
+            if (!Array.isArray(packet.channels) || !packet.channels.length) return;
+            lastMessageAt.current = Date.now();
+            packetCount.current += 1;
+            const simulated = packet.simulated || packet.stream.toLowerCase().includes("synthetic");
+            setSourceMode(simulated ? "simulation" : "live");
+            setSourceName(packet.stream || (simulated ? "Synthetic source" : "Live source"));
+            setSamples((current) => [...current, Number(packet.channels[0]) || 0].slice(-240));
+          } catch {}
+        };
+        ws.onclose = () => {
+          if (!closed) reconnectTimer = window.setTimeout(connect, 1600);
+        };
+        ws.onerror = () => ws?.close();
+      } catch {
+        reconnectTimer = window.setTimeout(connect, 1800);
+      }
+    };
+
     connect();
-    return()=>{if(reconnect)clearTimeout(reconnect);ws?.close();};
-  },[gateway]);
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, [gateway, connectionEpoch]);
 
-  const streamChannels=useMemo(()=>streams.reduce((n,s)=>n+(s.channel_count||0),0),[streams]);
-  const subsystems:Subsystem[]=[
-    {Icon:Cpu,label:"Signal Engine"},{Icon:Network,label:"Stream Graph"},
-    {Icon:Boxes,label:"3D Visual Lab"},{Icon:ShieldCheck,label:"Data Integrity"}
-  ];
-  const metrics:MetricCard[]=[
-    {Icon:Gauge,label:"Streams",value:status.streams},
-    {Icon:Activity,label:"Samples",value:samples.length},
-    {Icon:Clock3,label:"Last packet",value:lastTs.current?new Date(lastTs.current*1000).toLocaleTimeString():"—"}
-  ];
+  useEffect(() => {
+    const rateTimer = window.setInterval(() => {
+      setSampleRate(packetCount.current);
+      packetCount.current = 0;
+    }, 1000);
 
-  return <main className="min-h-screen px-4 py-4 lg:px-6">
-    <div className="mx-auto max-w-[1800px]">
-      <header className="panel mb-4 flex flex-col gap-4 rounded-2xl px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[.26em] text-slate-500"><Waves size={13}/> Morpheus Workstation</div>
-          <div className="mt-1 flex items-baseline gap-3"><h1 className="text-2xl font-semibold tracking-tight">Neural Systems Console</h1><span className="rounded-md border border-white/10 bg-white/[.03] px-2 py-1 text-[10px] uppercase tracking-wider text-slate-500">v0.1</span></div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2"><span className="text-slate-500">Gateway </span><span className={status.status==="online"?"text-emerald-300":"text-slate-400"}>{status.status}</span></div>
-          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2"><span className="text-slate-500">RTT </span>{latency===null?"—":`${latency} ms`}</div>
-          <div className="rounded-lg border border-white/10 bg-black/20 px-3 py-2"><span className="text-slate-500">Channels </span>{streamChannels}</div>
-        </div>
-      </header>
+    const simulationTimer = window.setInterval(() => {
+      if (Date.now() - lastMessageAt.current < 2600) return;
+      const t = performance.now() / 1000;
+      const value =
+        Math.sin(t * 6.4) * 0.26 +
+        Math.sin(t * 13.2) * 0.08 +
+        Math.sin(t * 1.2) * 0.035;
+      packetCount.current += 1;
+      setSourceMode("simulation");
+      setSourceName("Local synthetic fallback");
+      setSamples((current) => [...current, value].slice(-240));
+    }, 40);
 
-      <section className="grid gap-4 xl:grid-cols-[260px_1fr]">
-        <aside className="panel rounded-2xl p-3">
-          <div className="space-y-2">
-            {cards.map(([title,body,Icon])=><div key={title} className="rounded-xl border border-white/[.07] bg-white/[.02] p-3">
-              <div className="flex items-center gap-2"><Icon size={16} className="text-slate-300"/><span className="text-sm font-medium">{title}</span></div>
-              <div className="mt-2 text-xs leading-5 text-slate-500">{body}</div>
-            </div>)}
+    return () => {
+      window.clearInterval(rateTimer);
+      window.clearInterval(simulationTimer);
+    };
+  }, []);
+
+  const channelCount = streams.reduce((sum, stream) => sum + Number(stream.channel_count || 0), 0);
+  const activeLabel = navItems.find((item) => item.id === view)?.label ?? "Overview";
+
+  return (
+    <main className="min-h-screen">
+      <div className="workstation-shell">
+        <aside className="workstation-sidebar">
+          <div className="px-3 pb-5 pt-3">
+            <div className="flex items-center gap-3">
+              <div className="morpheus-mark"><Waves size={17} /></div>
+              <div>
+                <div className="text-sm font-semibold tracking-tight text-slate-100">Morpheus</div>
+                <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">Research OS · v0.2</div>
+              </div>
+            </div>
           </div>
-          <div className="mt-4 border-t border-white/10 pt-4">
-            <div className="mb-2 text-[10px] uppercase tracking-[.22em] text-slate-600">Subsystems</div>
-            {subsystems.map(({Icon,label})=><div key={label} className="flex items-center gap-2 rounded-lg px-2 py-2 text-xs text-slate-400"><Icon size={14}/>{label}</div>)}
+
+          <nav className="space-y-1">
+            {navItems.map(({ id, label, icon: Icon, hint }) => (
+              <button
+                key={id}
+                onClick={() => setView(id)}
+                className={`nav-item ${view === id ? "nav-item-active" : ""}`}
+              >
+                <span className="nav-icon"><Icon size={15} /></span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs font-medium">{label}</span>
+                  <span className="mt-0.5 block text-[9px] text-slate-700">{hint}</span>
+                </span>
+              </button>
+            ))}
+          </nav>
+
+          <div className="mt-auto px-2 pb-2">
+            <div className="rounded-xl border border-white/[.06] bg-black/20 p-3">
+              <div className="flex items-center justify-between text-[9px] uppercase tracking-[.16em] text-slate-650">
+                <span>Acquisition</span>
+                <span className={status.status === "online" ? "text-emerald-300" : "text-slate-650"}>{status.status}</span>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-lg font-semibold text-slate-200">{channelCount}</div>
+                  <div className="text-[9px] text-slate-700">channels</div>
+                </div>
+                <div>
+                  <div className="text-lg font-semibold text-slate-200">{sampleRate}</div>
+                  <div className="text-[9px] text-slate-700">packets/s</div>
+                </div>
+              </div>
+            </div>
           </div>
         </aside>
 
-        <div className="space-y-4">
-          <div className="panel rounded-2xl p-2"><div className="flex gap-2">
-            <button onClick={()=>setActiveTab("monitor")} className={`rounded-lg px-3 py-2 text-xs ${activeTab==="monitor"?"bg-white/[.08] text-white":"text-slate-500"}`}>Signal Monitor</button>
-            <button onClick={()=>setActiveTab("visual")} className={`rounded-lg px-3 py-2 text-xs ${activeTab==="visual"?"bg-white/[.08] text-white":"text-slate-500"}`}>3D Visual Lab</button>
-          </div></div>
+        <div className="min-w-0 flex-1">
+          <header className="workstation-topbar">
+            <div className="min-w-0">
+              <div className="text-[9px] uppercase tracking-[.2em] text-slate-650">Project Morpheus / Workstation</div>
+              <div className="mt-1 truncate text-sm font-medium text-slate-200">{activeLabel}</div>
+            </div>
 
-          {activeTab==="monitor"?<>
-            <section className="grid gap-4 xl:grid-cols-[1.5fr_.5fr]">
-              <div className="panel rounded-2xl p-4">
-                <div className="mb-4 flex items-center justify-between"><div><h2 className="text-sm font-medium">Live waveform</h2><p className="mt-1 text-xs text-slate-600">First channel preview from WebSocket relay</p></div><ScanLine size={18} className="text-slate-600"/></div>
-                <div className="grid-bg h-[330px] overflow-hidden rounded-xl border border-white/[.06] p-3 text-sky-300"><Sparkline values={samples}/></div>
+            <div className="flex items-center gap-2">
+              <div className="hidden rounded-lg border border-white/[.06] bg-black/20 px-3 py-2 text-[10px] text-slate-600 sm:block">
+                {sourceMode === "live" ? sourceName || "LIVE" : sourceMode === "simulation" ? "SIMULATION" : "IDLE"}
               </div>
-              <div className="grid gap-4">
-                {metrics.map(({Icon,label,value})=><div key={label} className="panel rounded-2xl p-4">
-                  <div className="flex items-center gap-2 text-xs text-slate-500"><Icon size={14}/>{label}</div>
-                  <div className="mt-4 text-2xl font-semibold">{String(value)}</div>
-                </div>)}
+              <div className="rounded-lg border border-white/[.06] bg-black/20 px-3 py-2 text-[10px] text-slate-600">
+                RTT <span className="ml-1 text-slate-300">{latency === null ? "—" : `${latency} ms`}</span>
               </div>
-            </section>
+              <button onClick={() => setView("system")} className="button-icon" title="System diagnostics">
+                <Gauge size={14} />
+              </button>
+            </div>
+          </header>
 
-            <section className="grid gap-4 xl:grid-cols-[1.25fr_.75fr]">
-              <div className="panel rounded-2xl p-4">
-                <div className="mb-4 flex items-center justify-between"><div><h2 className="text-sm font-medium">Discovered streams</h2><p className="mt-1 text-xs text-slate-600">Native acquisition stays local.</p></div><Activity size={18} className="text-slate-600"/></div>
-                <div className="overflow-hidden rounded-xl border border-white/[.06]">
-                  <div className="grid grid-cols-[1.2fr_.7fr_.5fr_.6fr] bg-white/[.03] px-4 py-3 text-[10px] uppercase tracking-widest text-slate-600"><span>Stream</span><span>Type</span><span>Ch</span><span>Rate</span></div>
-                  {streams.length?streams.map(s=><div key={s.source_id||s.name} className="grid grid-cols-[1.2fr_.7fr_.5fr_.6fr] border-t border-white/[.06] px-4 py-3 text-xs"><span>{s.name}</span><span className="text-slate-500">{s.type}</span><span className="text-slate-500">{s.channel_count}</span><span className="text-slate-500">{s.nominal_srate||"irregular"} Hz</span></div>):<div className="border-t border-white/[.06] px-4 py-10 text-center text-xs text-slate-600">No LSL streams detected.</div>}
-                </div>
-              </div>
-              <div className="panel rounded-2xl p-4">
-                <h2 className="text-sm font-medium">M0 / Dataset Zero</h2><p className="mt-2 text-xs leading-5 text-slate-600">Ground truth and provenance layer for dream records and synchronized experiment events.</p>
-                <div className="mt-5 space-y-3">{["Capture","SHA-256 seal","Annotate","Link recurrence","Sync physiology"].map((x,i)=><div key={x} className="flex items-center gap-3 text-xs"><span className="flex h-6 w-6 items-center justify-center rounded-md border border-white/10 text-slate-600">{i+1}</span><span>{x}</span></div>)}</div>
-              </div>
-            </section>
-          </>:<section className="panel overflow-hidden rounded-2xl">
-            <div className="border-b border-white/[.07] px-4 py-3"><h2 className="text-sm font-medium">3D Visual Lab</h2><p className="mt-1 text-xs text-slate-600">Workspace for spatial reconstructions, latent geometry, volumetric data, and future dream-scene rendering.</p></div>
-            <div className="h-[720px]"><Scene3D/></div>
-          </section>}
+          <div className={`workstation-content ${view === "visual" ? "workstation-content-visual" : ""}`}>
+            {view === "overview" ? (
+              <OverviewPanel
+                status={status}
+                streams={streams}
+                latency={latency}
+                sampleRate={sampleRate}
+                sourceMode={sourceMode}
+                onNavigate={setView}
+              />
+            ) : null}
+
+            {view === "acquisition" ? (
+              <AcquisitionPanel
+                status={status}
+                streams={streams}
+                samples={samples}
+                latency={latency}
+                sampleRate={sampleRate}
+                sourceMode={sourceMode}
+                sourceName={sourceName}
+                gateway={gateway}
+                setGateway={setGateway}
+                reconnect={() => setConnectionEpoch((value) => value + 1)}
+              />
+            ) : null}
+
+            {view === "dataset" ? <DatasetZeroPanel /> : null}
+            {view === "experiments" ? <ExperimentsPanel gateway={gateway} /> : null}
+            {view === "public-data" ? <PublicDataPanel /> : null}
+            {view === "visual" ? <VisualLab /> : null}
+            {view === "system" ? (
+              <SystemPanel status={status} gateway={gateway} latency={latency} sourceMode={sourceMode} />
+            ) : null}
+          </div>
         </div>
-      </section>
-    </div>
-  </main>;
+      </div>
+    </main>
+  );
 }
