@@ -768,7 +768,8 @@ function SliceCanvas({
     if (!ctx) return;
 
     const width = orientation === "sagittal" ? z : x;
-    const height = orientation === "axial" ? y : z;
+    const height =
+      orientation === "axial" ? y : orientation === "coronal" ? z : y;
     canvas.width = width;
     canvas.height = height;
     const image = ctx.createImageData(width, height);
