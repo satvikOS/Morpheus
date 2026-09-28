@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import Image from "next/image";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
@@ -12,6 +12,7 @@ import {
   FlaskConical,
   Gauge,
   LayoutDashboard,
+  PanelsTopLeft,
   Radio,
   ScanSearch,
   Settings2,
@@ -20,6 +21,7 @@ import {
 
 import AcquisitionPanel from "@/components/workstation/acquisition-panel";
 import DatasetZeroPanel from "@/components/workstation/dataset-zero-panel";
+import EvidenceBar from "@/components/workstation/evidence-bar";
 import ExperimentsPanel from "@/components/workstation/experiments-panel";
 import ModelWorkersPanel from "@/components/workstation/model-workers-panel";
 import OverviewPanel from "@/components/workstation/overview-panel";
@@ -27,8 +29,9 @@ import PublicDataPanel from "@/components/workstation/public-data-panel";
 import ResearchProgramsPanel from "@/components/workstation/research-programs-panel";
 import SimulationPanel from "@/components/workstation/simulation-panel";
 import SystemPanel from "@/components/workstation/system-panel";
-import type { GatewayStatus, SamplePacket, StreamInfo, WorkstationView } from "@/lib/morpheus";
-import { buildWebSocketUrl } from "@/lib/morpheus";
+import WorkspacePanel from "@/components/workstation/workspace-panel";
+import type { GatewayStatus, StreamInfo, WorkstationView } from "@/lib/morpheus";
+import { useSignalEngine } from "@/lib/use-signal-engine";
 
 const VisualLab = dynamic(() => import("./visual-lab"), {
   ssr: false,
@@ -42,10 +45,6 @@ const VisualLab = dynamic(() => import("./visual-lab"), {
 const DEFAULT_GATEWAY =
   process.env.NEXT_PUBLIC_MORPHEUS_GATEWAY_URL || "/api/signal-gateway";
 
-const RING_SIZE = 8192;
-const MAX_UI_CHANNELS = 16;
-const VIEW_SAMPLES = 320;
-
 type NavItem = {
   id: WorkstationView;
   label: string;
@@ -54,13 +53,14 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
+  { id: "workspace", label: "Workspace", icon: PanelsTopLeft, hint: "Multi-pane operations" },
   { id: "overview", label: "Overview", icon: LayoutDashboard, hint: "Command layer" },
   { id: "acquisition", label: "Acquisition", icon: Radio, hint: "Live signals" },
   { id: "dataset", label: "Dataset Zero", icon: Database, hint: "Ground truth" },
-  { id: "experiments", label: "Experiments", icon: FlaskConical, hint: "Markers" },
+  { id: "experiments", label: "Experiments", icon: FlaskConical, hint: "Markers & sessions" },
   { id: "programs", label: "M0–M5 Programs", icon: BookOpenCheck, hint: "Research stack" },
   { id: "models", label: "Model Workers", icon: BrainCircuit, hint: "Compute fabric" },
-  { id: "simulation", label: "Simulation", icon: Activity, hint: "Synthetic brains" },
+  { id: "simulation", label: "Simulation", icon: Activity, hint: "Synthetic systems" },
   { id: "public-data", label: "Public Data", icon: ScanSearch, hint: "Open archives" },
   { id: "visual", label: "3D Neuro Space", icon: Sparkles, hint: "Volume + spatial" },
   { id: "system", label: "System", icon: Settings2, hint: "Diagnostics" },
@@ -71,7 +71,7 @@ function endpoint(base: string, path: string) {
 }
 
 export default function Home() {
-  const [view, setView] = useState<WorkstationView>("overview");
+  const [view, setView] = useState<WorkstationView>("workspace");
   const [gateway, setGatewayState] = useState(DEFAULT_GATEWAY);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [status, setStatus] = useState<GatewayStatus>({
@@ -80,42 +80,19 @@ export default function Home() {
     timestamp: "",
   });
   const [streams, setStreams] = useState<StreamInfo[]>([]);
-  const [samples, setSamples] = useState<number[]>([]);
-  const [channelSamples, setChannelSamples] = useState<number[][]>([]);
   const [latency, setLatency] = useState<number | null>(null);
-  const [sampleRate, setSampleRate] = useState(0);
-  const [sourceMode, setSourceMode] =
-    useState<"live" | "simulation" | "idle">("idle");
-  const [sourceName, setSourceName] = useState("");
   const [selectedSourceId, setSelectedSourceId] = useState("");
 
-  const packetCount = useRef(0);
-  const lastMessageAt = useRef(0);
-  const writeIndex = useRef(0);
-  const totalSamples = useRef(0);
-  const activeChannelCount = useRef(1);
-  const channelRings = useRef(
-    Array.from({ length: MAX_UI_CHANNELS }, () => new Float32Array(RING_SIZE)),
-  );
-
-  const pushPacket = (values: number[]) => {
-    const bounded = values.slice(0, MAX_UI_CHANNELS);
-    activeChannelCount.current = Math.max(1, bounded.length);
-
-    for (let channel = 0; channel < activeChannelCount.current; channel += 1) {
-      channelRings.current[channel][writeIndex.current] =
-        Number.isFinite(Number(bounded[channel])) ? Number(bounded[channel]) : 0;
-    }
-
-    writeIndex.current = (writeIndex.current + 1) % RING_SIZE;
-    totalSamples.current += 1;
-    packetCount.current += 1;
-  };
+  const signal = useSignalEngine(gateway, selectedSourceId, connectionEpoch);
+  const channelSamples = signal.snapshots;
+  const samples = channelSamples[0] ?? [];
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem("morpheus.gateway");
       if (saved) setGatewayState(saved);
+      const savedSource = localStorage.getItem("morpheus.source");
+      if (savedSource) setSelectedSourceId(savedSource);
     } catch {}
   }, []);
 
@@ -123,6 +100,13 @@ export default function Home() {
     setGatewayState(value);
     try {
       localStorage.setItem("morpheus.gateway", value);
+    } catch {}
+  };
+
+  const setSelectedSource = (value: string) => {
+    setSelectedSourceId(value);
+    try {
+      localStorage.setItem("morpheus.source", value);
     } catch {}
   };
 
@@ -173,113 +157,12 @@ export default function Home() {
     };
   }, [gateway, connectionEpoch]);
 
-  useEffect(() => {
-    let ws: WebSocket | undefined;
-    let reconnectTimer: number | undefined;
-    let closed = false;
-
-    const connect = () => {
-      if (closed) return;
-
-      try {
-        const sourceQuery = selectedSourceId
-          ? `?source_id=${encodeURIComponent(selectedSourceId)}`
-          : "";
-        ws = new WebSocket(buildWebSocketUrl(gateway, `/ws/samples${sourceQuery}`));
-
-        ws.onmessage = (event) => {
-          try {
-            const packet = JSON.parse(event.data) as SamplePacket;
-            if (!Array.isArray(packet.channels) || !packet.channels.length) return;
-
-            lastMessageAt.current = Date.now();
-            const simulated =
-              packet.simulated ||
-              packet.stream.toLowerCase().includes("synthetic");
-
-            setSourceMode(simulated ? "simulation" : "live");
-            setSourceName(
-              packet.stream || (simulated ? "Synthetic source" : "Live source"),
-            );
-            pushPacket(packet.channels);
-          } catch {}
-        };
-
-        ws.onclose = () => {
-          if (!closed) reconnectTimer = window.setTimeout(connect, 1500);
-        };
-
-        ws.onerror = () => ws?.close();
-      } catch {
-        reconnectTimer = window.setTimeout(connect, 1800);
-      }
-    };
-
-    connect();
-
-    return () => {
-      closed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      ws?.close();
-    };
-  }, [gateway, connectionEpoch, selectedSourceId]);
-
-  useEffect(() => {
-    const rateTimer = window.setInterval(() => {
-      setSampleRate(packetCount.current);
-      packetCount.current = 0;
-    }, 1000);
-
-    const simulationTimer = window.setInterval(() => {
-      if (Date.now() - lastMessageAt.current < 2600) return;
-
-      const t = performance.now() / 1000;
-      const synthetic = Array.from({ length: 8 }, (_, channel) => {
-        const phase = channel * 0.31;
-        return (
-          Math.sin(t * (5.6 + channel * 0.18) + phase) * 0.2 +
-          Math.sin(t * (12.4 + channel * 0.27) + phase * 1.7) * 0.07 +
-          Math.sin(t * 1.1 + phase) * 0.025
-        );
-      });
-
-      pushPacket(synthetic);
-      setSourceMode("simulation");
-      setSourceName("Local synthetic fallback");
-    }, 20);
-
-    const renderTimer = window.setInterval(() => {
-      const count = Math.min(VIEW_SAMPLES, totalSamples.current, RING_SIZE);
-      if (!count) return;
-
-      const channels = Math.max(1, activeChannelCount.current);
-      const start = (writeIndex.current - count + RING_SIZE) % RING_SIZE;
-      const snapshots = Array.from({ length: channels }, (_, channel) => {
-        const ring = channelRings.current[channel];
-        const snapshot = new Array<number>(count);
-        for (let index = 0; index < count; index += 1) {
-          snapshot[index] = ring[(start + index) % RING_SIZE];
-        }
-        return snapshot;
-      });
-
-      setChannelSamples(snapshots);
-      setSamples(snapshots[0] ?? []);
-    }, 33);
-
-    return () => {
-      window.clearInterval(rateTimer);
-      window.clearInterval(simulationTimer);
-      window.clearInterval(renderTimer);
-    };
-  }, []);
-
-  const channelCount = streams.reduce(
+  const activeLabel =
+    navItems.find((item) => item.id === view)?.label ?? "Workspace";
+  const discoveredChannels = streams.reduce(
     (sum, stream) => sum + Number(stream.channel_count || 0),
     0,
   );
-  const activeLabel =
-    navItems.find((item) => item.id === view)?.label ?? "Overview";
 
   return (
     <main className="min-h-screen">
@@ -302,7 +185,7 @@ export default function Home() {
                   Morpheus
                 </div>
                 <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">
-                  Research OS · v0.3
+                  Research OS · v0.4
                 </div>
               </div>
             </div>
@@ -329,32 +212,37 @@ export default function Home() {
           </nav>
 
           <div className="mt-auto px-2 pb-2 pt-3">
-            <div className="rounded-xl border border-white/[.06] bg-black/20 p-3">
-              <div className="flex items-center justify-between text-[9px] uppercase tracking-[.16em] text-slate-650">
-                <span>Acquisition</span>
-                <span
+            <div className="sidebar-status">
+              <div className="sidebar-status-row">
+                <span>Evidence</span>
+                <strong
                   className={
-                    status.status === "online"
+                    signal.sourceMode === "live"
                       ? "text-emerald-300"
-                      : "text-slate-650"
+                      : signal.sourceMode === "simulation"
+                        ? "text-amber-200"
+                        : "text-slate-500"
                   }
                 >
-                  {status.status}
-                </span>
+                  {signal.sourceMode.toUpperCase()}
+                </strong>
               </div>
-
-              <div className="mt-3 grid grid-cols-2 gap-2">
+              <div className="sidebar-status-grid">
                 <div>
-                  <div className="text-lg font-semibold text-slate-200">
-                    {channelCount || channelSamples.length}
-                  </div>
-                  <div className="text-[9px] text-slate-700">channels</div>
+                  <strong>{discoveredChannels || channelSamples.length}</strong>
+                  <span>channels</span>
                 </div>
                 <div>
-                  <div className="text-lg font-semibold text-slate-200">
-                    {sampleRate}
-                  </div>
-                  <div className="text-[9px] text-slate-700">packets/s</div>
+                  <strong>{signal.packetRate}</strong>
+                  <span>packets/s</span>
+                </div>
+                <div>
+                  <strong>{signal.dropped}</strong>
+                  <span>dropped</span>
+                </div>
+                <div>
+                  <strong>{signal.sharedMemory ? "SAB" : "COPY"}</strong>
+                  <span>memory</span>
                 </div>
               </div>
             </div>
@@ -372,22 +260,25 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <div className="hidden rounded-lg border border-white/[.06] bg-black/20 px-3 py-2 text-[10px] text-slate-600 sm:block">
-                {sourceMode === "live"
-                  ? sourceName || "LIVE"
-                  : sourceMode === "simulation"
-                    ? "SIMULATION"
-                    : "IDLE"}
+            <div className="topbar-status">
+              <div>
+                <span>Source</span>
+                <strong>
+                  {signal.sourceMode === "live"
+                    ? signal.sourceName || "LIVE"
+                    : signal.sourceMode === "simulation"
+                      ? "SIMULATION"
+                      : "IDLE"}
+                </strong>
               </div>
-
-              <div className="rounded-lg border border-white/[.06] bg-black/20 px-3 py-2 text-[10px] text-slate-600">
-                RTT{" "}
-                <span className="ml-1 text-slate-300">
-                  {latency === null ? "—" : `${latency} ms`}
-                </span>
+              <div>
+                <span>RTT</span>
+                <strong>{latency === null ? "—" : `${latency} ms`}</strong>
               </div>
-
+              <div>
+                <span>Rate</span>
+                <strong>{signal.packetRate || "—"}</strong>
+              </div>
               <button
                 onClick={() => setView("system")}
                 className="button-icon"
@@ -398,18 +289,44 @@ export default function Home() {
             </div>
           </header>
 
+          <EvidenceBar
+            mode={signal.sourceMode}
+            status={status}
+            transport={signal.transport}
+            packetRate={signal.packetRate}
+            dropped={signal.dropped}
+            sharedMemory={signal.sharedMemory}
+            gateway={gateway}
+          />
+
           <div
             className={`workstation-content ${
               view === "visual" ? "workstation-content-visual" : ""
             }`}
           >
+            {view === "workspace" ? (
+              <WorkspacePanel
+                ring={signal.ring}
+                snapshots={channelSamples}
+                packetRate={signal.packetRate}
+                sourceMode={signal.sourceMode}
+                sourceName={signal.sourceName}
+                gateway={gateway}
+                status={status}
+                streams={streams}
+                latency={latency}
+                dropped={signal.dropped}
+                onNavigate={setView}
+              />
+            ) : null}
+
             {view === "overview" ? (
               <OverviewPanel
                 status={status}
                 streams={streams}
                 latency={latency}
-                sampleRate={sampleRate}
-                sourceMode={sourceMode}
+                sampleRate={signal.packetRate}
+                sourceMode={signal.sourceMode}
                 onNavigate={setView}
               />
             ) : null}
@@ -420,15 +337,19 @@ export default function Home() {
                 streams={streams}
                 samples={samples}
                 channelSamples={channelSamples}
+                ring={signal.ring}
                 latency={latency}
-                sampleRate={sampleRate}
-                sourceMode={sourceMode}
-                sourceName={sourceName}
+                sampleRate={signal.packetRate}
+                sourceMode={signal.sourceMode}
+                sourceName={signal.sourceName}
                 gateway={gateway}
                 setGateway={setGateway}
                 reconnect={() => setConnectionEpoch((value) => value + 1)}
                 selectedSourceId={selectedSourceId}
-                setSelectedSourceId={setSelectedSourceId}
+                setSelectedSourceId={setSelectedSource}
+                dropped={signal.dropped}
+                transport={signal.transport}
+                sharedMemory={signal.sharedMemory}
               />
             ) : null}
 
@@ -438,7 +359,10 @@ export default function Home() {
             ) : null}
             {view === "programs" ? <ResearchProgramsPanel /> : null}
             {view === "models" ? (
-              <ModelWorkersPanel samples={samples} channelSamples={channelSamples} />
+              <ModelWorkersPanel
+                samples={samples}
+                channelSamples={channelSamples}
+              />
             ) : null}
             {view === "simulation" ? <SimulationPanel /> : null}
             {view === "public-data" ? <PublicDataPanel /> : null}
@@ -448,7 +372,7 @@ export default function Home() {
                 status={status}
                 gateway={gateway}
                 latency={latency}
-                sourceMode={sourceMode}
+                sourceMode={signal.sourceMode}
               />
             ) : null}
           </div>
