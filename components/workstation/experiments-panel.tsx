@@ -163,7 +163,6 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
         </Panel>
 
         <Panel>
-        <Panel>
           <SectionHeader eyebrow="Synchronized events" title="Marker console" description="Markers timestamp experimental events. Gateway acknowledgement is recorded when available." />
           <div className="space-y-3 p-4">
             <label className="block">
