@@ -1,0 +1,12 @@
+services:
+  signal-gateway:
+    build:
+      context: ./services/signal-gateway
+    container_name: morpheus-signal-gateway
+    ports:
+      - "8787:8787"
+    environment:
+      MORPHEUS_LOCAL_RECORDING_DIR: /data/sessions
+    volumes:
+      - ${MORPHEUS_RECORDINGS:-./.morpheus-recordings}:/data
+    restart: unless-stopped
