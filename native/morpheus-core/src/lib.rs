@@ -19,6 +19,25 @@ pub enum RingError {
     ChannelOutOfRange { channel: usize, channels: usize },
 }
 
+impl fmt::Display for RingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroChannels => write!(f, "channel count must be greater than zero"),
+            Self::ZeroCapacity => write!(f, "ring capacity must be greater than zero"),
+            Self::FrameWidth { expected, received } => write!(
+                f,
+                "frame width mismatch: expected {expected} channels, received {received}"
+            ),
+            Self::ChannelOutOfRange { channel, channels } => write!(
+                f,
+                "channel index {channel} is outside 0..{channels}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RingError {}
+
 #[derive(Debug, Clone)]
 pub struct MultiChannelRing {
     channels: usize,
