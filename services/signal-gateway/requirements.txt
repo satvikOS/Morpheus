@@ -4,3 +4,6 @@ pydantic==2.11.9
 pylsl==1.17.6
 brainflow==5.18.1
 numpy==2.3.3
+mne==1.10.1
+pyxdf==1.17.0
+scipy==1.16.2
