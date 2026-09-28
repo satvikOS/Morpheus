@@ -11,6 +11,11 @@ export type StreamInfo = {
   channel_count: number;
   nominal_srate: number;
   source_id: string;
+  uid?: string;
+  hostname?: string;
+  channel_format?: string | number;
+  channel_labels?: string[];
+  channel_units?: string[];
 };
 
 export type SamplePacket = {
@@ -21,6 +26,7 @@ export type SamplePacket = {
 };
 
 export type WorkstationView =
+  | "workspace"
   | "overview"
   | "acquisition"
   | "dataset"
@@ -48,6 +54,8 @@ export type MarkerEvent = {
   label: string;
   timestamp: number;
   source: "local" | "gateway";
+  clock_domain?: string;
+  wall_timestamp?: number;
 };
 
 export type PublicDataset = {
