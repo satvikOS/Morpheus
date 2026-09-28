@@ -20,10 +20,17 @@ import { Metric, Panel, SectionHeader, StatusDot } from "./ui";
 
 const engines = [
   {
+    name: "Native DSP Core",
+    kind: "Rust",
+    status: "COMPILED",
+    body: "Bounded ring primitives, MRPH binary protocol, radix-2 FFT, band-power utilities, min/max envelope and biquad notch filtering live in morpheus-core.",
+    icon: Cpu,
+  },
+  {
     name: "Signal DSP Worker",
     kind: "Browser Worker",
     status: "READY",
-    body: "Multichannel time-domain, spectral and signal-quality metrics off the React main thread.",
+    body: "Browser-side preview metrics remain isolated from React. They are non-authoritative display diagnostics while native DSP owns the long-term acquisition path.",
     icon: Activity,
   },
   {
@@ -121,7 +128,7 @@ export default function ModelWorkersPanel({
         <SectionHeader
           eyebrow="Compute fabric"
           title="Model and signal workers"
-          description="Morpheus isolates lightweight multichannel DSP in browser workers now, while keeping future validated inference and heavy GPU compute behind explicit local/native worker boundaries."
+          description="Morpheus now has a compiled Rust DSP/acquisition core plus a browser-worker preview path. Native and browser execution are shown separately so a staged model service is never presented as active compute."
           action={
             <button
               onClick={() => setAuto((value) => !value)}
@@ -132,7 +139,7 @@ export default function ModelWorkersPanel({
           }
         />
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-6">
-          <Metric label="Worker backend" value="Web Worker" detail="main-thread isolated" />
+          <Metric label="Preview backend" value="Web Worker" detail="main-thread isolated" />
           <Metric label="Channels" value={channelAnalysis.length || channelSamples.length || 1} />
           <Metric
             label="Analysis latency"
@@ -273,12 +280,12 @@ export default function ModelWorkersPanel({
           {[
             [
               "Browser",
-              "Rendering, interaction, lightweight DSP and local record hashing.",
+              "Rendering, interaction, display DSP previews and local record hashing.",
               Cpu,
             ],
             [
               "Gateway",
-              "Acquisition, synchronization, local recording, preprocessing and native device adapters.",
+              "Native ring/packet core, acquisition adapters, synchronization, local recording and preprocessing.",
               ServerCog,
             ],
             [

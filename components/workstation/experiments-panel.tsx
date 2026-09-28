@@ -1,19 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { CircleDot, DatabaseBackup, Pause, Play, Plus, Send, TimerReset } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  CircleDot,
+  DatabaseBackup,
+  Pause,
+  Play,
+  Plus,
+  Send,
+  TimerReset,
+  Trash2,
+} from "lucide-react";
 import type { MarkerEvent } from "@/lib/morpheus";
-import type { ClockSyncState, SignalEngineState } from "@/lib/use-signal-engine";
+import type {
+  ClockSyncState,
+  SignalEngineState,
+} from "@/lib/use-signal-engine";
+import {
+  deleteReinstatementTrial,
+  listReinstatementTrials,
+  putReinstatementTrial,
+  summarizeReinstatement,
+  type ReinstatementTrial,
+} from "@/lib/reinstatement-store";
 import { Panel, SectionHeader } from "./ui";
 
-const milestones = [
-  { id: "M0", title: "Dataset Zero", status: "ACTIVE", body: "Immutable reports, timestamps, provenance, annotations, and recurrence links." },
-  { id: "M1", title: "Recurrence", status: "NEXT", body: "Objective semantic, spatial, and narrative continuity analysis across records." },
-  { id: "M2", title: "Reinstatement", status: "PLANNED", body: "Controlled interruption duration and pre-registered dream continuation criteria." },
-  { id: "M3", title: "Neural baseline", status: "PLANNED", body: "Reproduce public EEG/fMRI decoding baselines with held-out evaluation." },
-  { id: "M4", title: "Live physiology", status: "BOOTSTRAP", body: "Synchronized markers, EEG streams, XDF/NWB-compatible acquisition, and quality metrics." },
-  { id: "M5", title: "Individual atlas", status: "RESEARCH", body: "Subject-specific alignment across perception, imagery, sleep, and session boundaries." },
-];
+const delayConditions = [5, 30, 120, 600, 1800];
 
 export default function ExperimentsPanel({
   gateway,
@@ -41,137 +53,344 @@ export default function ExperimentsPanel({
   }>({ enabled: false, active: false });
   const [recordingBusy, setRecordingBusy] = useState(false);
 
+  const [trials, setTrials] = useState<ReinstatementTrial[]>([]);
+  const [delaySeconds, setDelaySeconds] = useState(30);
+  const [intentionCondition, setIntentionCondition] = useState(false);
+  const [preDreamId, setPreDreamId] = useState("");
+  const [postDreamId, setPostDreamId] = useState("");
+  const [continuityScore, setContinuityScore] = useState(3);
+  const [notes, setNotes] = useState("");
+  const [blinded, setBlinded] = useState(true);
+  const [activeTrial, setActiveTrial] = useState<ReinstatementTrial | null>(null);
+
+  useEffect(() => {
+    void listReinstatementTrials().then(setTrials).catch(() => {});
+  }, []);
+
+  const summary = useMemo(
+    () => summarizeReinstatement(trials),
+    [trials],
+  );
+
   const refreshRecording = async () => {
     try {
-      const response = await fetch(`${gateway.replace(/\/$/, "")}/recording`, { cache: "no-store" });
+      const response = await fetch(
+        gateway.replace(/\/$/, "") + "/recording",
+        { cache: "no-store" },
+      );
       if (!response.ok) return;
-      const payload = await response.json();
-      setRecording(payload);
+      setRecording(await response.json());
     } catch {}
   };
 
   useEffect(() => {
     void refreshRecording();
-    const timer = window.setInterval(() => void refreshRecording(), 2500);
+    const timer = window.setInterval(
+      () => void refreshRecording(),
+      2500,
+    );
     return () => window.clearInterval(timer);
   }, [gateway]);
 
   const toggleRecording = async () => {
     if (recordingBusy) return;
     setRecordingBusy(true);
+
     try {
       const base = gateway.replace(/\/$/, "");
       const response = await fetch(
-        recording.active ? `${base}/recording/stop` : `${base}/recording/start`,
+        recording.active
+          ? base + "/recording/stop"
+          : base + "/recording/start",
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: recording.active ? "{}" : JSON.stringify({ session_id: sessionId.trim() || null }),
+          body: recording.active
+            ? "{}"
+            : JSON.stringify({
+                session_id: sessionId.trim() || null,
+              }),
         },
       );
       const payload = await response.json();
+
       if (recording.active) {
-        setRecording((current) => ({ ...current, active: false }));
+        setRecording((current) => ({
+          ...current,
+          active: false,
+          manifest_path: payload.manifest_path,
+          sha256: payload.sha256,
+        }));
       } else if (payload.started) {
-        setRecording((current) => ({ ...current, active: true, session_id: payload.session_id, path: payload.path }));
+        setRecording((current) => ({
+          ...current,
+          active: true,
+          session_id: payload.session_id,
+          path: payload.path,
+        }));
       }
+
       await refreshRecording();
-    } catch {
     } finally {
       setRecordingBusy(false);
     }
   };
 
-  const sendMarker = async () => {
-    const markerLabel = label.trim();
-    if (!markerLabel || sending || !armed) return;
+  const sendMarker = async (
+    explicitLabel?: string,
+    payload: Record<string, unknown> = {},
+  ) => {
+    const markerLabel = (explicitLabel || label).trim();
+    if (!markerLabel || sending || !armed) return null;
 
     setSending(true);
-    const result = await emitMarker(markerLabel);
-    const marker = result.marker;
+    try {
+      const result = await emitMarker(markerLabel, payload);
+      const marker = result.marker;
+      const event: MarkerEvent = {
+        id: crypto.randomUUID(),
+        label: markerLabel,
+        timestamp: Number(
+          marker?.timestamp || Date.now() / 1000,
+        ),
+        wall_timestamp: marker?.wall_timestamp,
+        source: result.accepted ? "gateway" : "local",
+        clock_domain:
+          marker?.clock_domain || "browser_untrusted",
+        timestamp_method: marker?.timestamp_method,
+        sync_uncertainty_ms:
+          marker?.sync_uncertainty_ms,
+        transport: result.transport,
+      };
+      setEvents((current) =>
+        [event, ...current].slice(0, 80),
+      );
+      return event;
+    } finally {
+      setSending(false);
+    }
+  };
 
-    const event: MarkerEvent = {
+  const startTrial = async () => {
+    const trial: ReinstatementTrial = {
       id: crypto.randomUUID(),
-      label: markerLabel,
-      timestamp: Number(marker?.timestamp || Date.now() / 1000),
-      wall_timestamp: marker?.wall_timestamp,
-      source: result.accepted ? "gateway" : "local",
-      clock_domain: marker?.clock_domain || "browser_untrusted",
-      timestamp_method: marker?.timestamp_method,
-      sync_uncertainty_ms: marker?.sync_uncertainty_ms,
-      transport: result.transport,
+      sessionId:
+        recording.session_id ||
+        sessionId ||
+        "m2-" + Date.now(),
+      createdAt: new Date().toISOString(),
+      delaySeconds,
+      intentionCondition,
+      preDreamId: preDreamId.trim() || undefined,
+      continuityScore: null,
+      blinded,
+      notes: "",
     };
 
-    setEvents((current) => [event, ...current].slice(0, 40));
-    setSending(false);
+    await putReinstatementTrial(trial);
+    setTrials((current) => [trial, ...current]);
+    setActiveTrial(trial);
+
+    if (armed) {
+      await sendMarker("M2_TRIAL_START", {
+        trial_id: trial.id,
+        delay_seconds: delaySeconds,
+        intention_condition: intentionCondition,
+      });
+    }
+  };
+
+  const markAwakening = async () => {
+    if (!activeTrial || !armed) return;
+    await sendMarker("AWAKEN", {
+      trial_id: activeTrial.id,
+      delay_seconds: activeTrial.delaySeconds,
+    });
+  };
+
+  const completeTrial = async () => {
+    if (!activeTrial) return;
+
+    const complete: ReinstatementTrial = {
+      ...activeTrial,
+      postDreamId: postDreamId.trim() || undefined,
+      continuityScore,
+      notes: notes.trim(),
+      blinded,
+      completedAt: new Date().toISOString(),
+    };
+
+    await putReinstatementTrial(complete);
+    setTrials((current) =>
+      current.map((trial) =>
+        trial.id === complete.id ? complete : trial,
+      ),
+    );
+
+    if (armed) {
+      await sendMarker("M2_TRIAL_END", {
+        trial_id: complete.id,
+        continuity_score: complete.continuityScore,
+        blinded: complete.blinded,
+      });
+    }
+
+    setActiveTrial(null);
+    setPostDreamId("");
+    setNotes("");
+  };
+
+  const removeTrial = async (id: string) => {
+    await deleteReinstatementTrial(id);
+    setTrials((current) =>
+      current.filter((trial) => trial.id !== id),
+    );
+    if (activeTrial?.id === id) setActiveTrial(null);
   };
 
   return (
     <div className="space-y-4">
       <Panel>
         <SectionHeader
-          eyebrow="Research program"
+          eyebrow="M2 execution"
           title="Experiment control"
-          description="Milestones are ordered by evidentiary dependency. Later reconstruction work does not become a scientific claim until upstream measurement and decoding survive validation."
+          description="Run controlled interruption trials with explicit delay conditions, intention condition, synchronized marker provenance and blinded continuation scoring."
+          action={
+            <span className="tag">
+              {trials.length} LOCAL TRIALS
+            </span>
+          }
         />
-        <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
-          {milestones.map((milestone) => (
-            <div key={milestone.id} className="rounded-xl border border-white/[.07] bg-black/10 p-4">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs text-sky-200">{milestone.id}</span>
-                <span className="tag-muted">{milestone.status}</span>
-              </div>
-              <div className="mt-5 text-sm font-medium text-slate-200">{milestone.title}</div>
-              <p className="mt-2 text-xs leading-5 text-slate-600">{milestone.body}</p>
-            </div>
-          ))}
+        <div className="experiment-summary-grid">
+          <div>
+            <span>Completed</span>
+            <strong>
+              {
+                trials.filter(
+                  (trial) =>
+                    trial.continuityScore !== null,
+                ).length
+              }
+            </strong>
+          </div>
+          <div>
+            <span>Conditions</span>
+            <strong>{summary.length}</strong>
+          </div>
+          <div>
+            <span>Marker clock</span>
+            <strong>
+              {clockSync.ready
+                ? "SYNCED"
+                : "UNSYNC"}
+            </strong>
+          </div>
+          <div>
+            <span>Recorder</span>
+            <strong>
+              {recording.active
+                ? "ACTIVE"
+                : recording.enabled
+                  ? "READY"
+                  : "LOCAL"}
+            </strong>
+          </div>
         </div>
       </Panel>
 
-      <div className="grid gap-4 xl:grid-cols-[.65fr_1.35fr]">
+      <div className="grid gap-4 xl:grid-cols-[.72fr_1.28fr]">
         <Panel>
           <SectionHeader
             eyebrow="Local session recorder"
             title="Acquisition recording"
-            description="Authoritative raw recording is local-only. On the local gateway, set MORPHEUS_LOCAL_RECORDING_DIR to enable newline-delimited session capture with synchronized markers."
+            description="Authoritative raw recording remains local. The hosted service cannot retain neural sessions."
             action={
-              <span className={recording.active ? "tag" : "tag-muted"}>
-                {recording.active ? "RECORDING" : recording.enabled ? "READY" : "LOCAL ONLY"}
+              <span
+                className={
+                  recording.active
+                    ? "tag"
+                    : "tag-muted"
+                }
+              >
+                {recording.active
+                  ? "RECORDING"
+                  : recording.enabled
+                    ? "READY"
+                    : "LOCAL ONLY"}
               </span>
             }
           />
           <div className="space-y-3 p-4">
-            <label className="block">
-              <span className="mb-2 block text-[10px] uppercase tracking-[.16em] text-slate-600">Session ID</span>
+            <label className="field-label">
+              <span>Session ID</span>
               <input
-                value={recording.active ? recording.session_id || "" : sessionId}
+                value={
+                  recording.active
+                    ? recording.session_id || ""
+                    : sessionId
+                }
                 disabled={recording.active}
-                onChange={(event) => setSessionId(event.target.value.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 96))}
+                onChange={(event) =>
+                  setSessionId(
+                    event.target.value
+                      .replace(
+                        /[^a-zA-Z0-9_-]/g,
+                        "",
+                      )
+                      .slice(0, 96),
+                  )
+                }
                 placeholder="m2-reinstatement-001"
-                className="w-full rounded-lg border border-white/[.08] bg-black/20 px-3 py-2.5 font-mono text-xs text-slate-300 outline-none disabled:opacity-60"
+                className="research-input"
               />
             </label>
+
             <button
-              onClick={toggleRecording}
-              disabled={recordingBusy || (!recording.enabled && !recording.active)}
+              onClick={() => void toggleRecording()}
+              disabled={
+                recordingBusy ||
+                (!recording.enabled &&
+                  !recording.active)
+              }
               className="button-primary w-full disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {recording.active ? <Pause size={13} /> : <DatabaseBackup size={13} />}
-              {recordingBusy ? "Updating..." : recording.active ? "Stop and seal recording" : "Start local recording"}
+              {recording.active ? (
+                <Pause size={13} />
+              ) : (
+                <DatabaseBackup size={13} />
+              )}
+              {recordingBusy
+                ? "Updating..."
+                : recording.active
+                  ? "Stop and seal recording"
+                  : "Start local recording"}
             </button>
+
             <div className="grid grid-cols-2 gap-2">
-              <div className="rounded-lg border border-white/[.06] bg-black/15 p-3">
-                <div className="text-[9px] uppercase tracking-[.15em] text-slate-650">Samples</div>
-                <div className="mt-2 font-mono text-sm text-slate-300">{recording.samples ?? 0}</div>
-              </div>
-              <div className="rounded-lg border border-white/[.06] bg-black/15 p-3">
-                <div className="text-[9px] uppercase tracking-[.15em] text-slate-650">Markers</div>
-                <div className="mt-2 font-mono text-sm text-slate-300">{recording.markers ?? 0}</div>
-              </div>
+              <ExperimentMetric
+                label="Samples"
+                value={String(recording.samples ?? 0)}
+              />
+              <ExperimentMetric
+                label="Markers"
+                value={String(recording.markers ?? 0)}
+              />
             </div>
+
+            {recording.sha256 ? (
+              <div className="operator-note">
+                Finalized SHA-256{" "}
+                <span className="font-mono">
+                  {recording.sha256.slice(0, 20)}…
+                </span>
+              </div>
+            ) : null}
+
             {!recording.enabled ? (
-              <div className="rounded-xl border border-amber-300/10 bg-amber-300/[.025] p-3 text-[11px] leading-5 text-slate-600">
-                Hosted Vercel mode intentionally cannot retain raw neural sessions. Run the local gateway and set MORPHEUS_LOCAL_RECORDING_DIR to activate this recorder.
+              <div className="operator-note">
+                Configure the local gateway recording
+                directory or native Morpheus recorder to
+                make this session authoritative.
               </div>
             ) : null}
           </div>
@@ -179,95 +398,460 @@ export default function ExperimentsPanel({
 
         <Panel>
           <SectionHeader
-            eyebrow="Synchronized events"
-            title="Marker console"
-            description="Arm the marker plane before a trial. Morpheus continuously estimates browser-to-gateway clock offset; the event time is mapped into the gateway clock domain before transport when measured uncertainty is acceptable, while gateway arrival remains the fallback."
+            eyebrow="Synchronized control"
+            title="Marker plane"
+            description="Software markers retain timing class, transport and uncertainty. Hardware/DAQ markers remain the reference for protocols that require tighter timing."
             action={
               <button
-                onClick={() => setArmed((value) => !value)}
-                className={armed ? "mode-pill mode-pill-live" : "mode-pill"}
+                onClick={() =>
+                  setArmed((value) => !value)
+                }
+                className={
+                  armed
+                    ? "mode-pill mode-pill-live"
+                    : "mode-pill"
+                }
               >
                 {armed ? "ARMED" : "DISARMED"}
               </button>
             }
           />
+
           <div className="space-y-3 p-4">
-            <label className="block">
-              <span className="mb-2 block text-[10px] uppercase tracking-[.16em] text-slate-600">Marker label</span>
+            <label className="field-label">
+              <span>Marker label</span>
               <input
                 value={label}
-                onChange={(event) => setLabel(event.target.value.toUpperCase().replace(/\s+/g, "_"))}
-                onKeyDown={(event) => { if (event.key === "Enter") void sendMarker(); }}
-                className="w-full rounded-lg border border-white/[.08] bg-black/20 px-3 py-2.5 font-mono text-xs text-slate-300 outline-none focus:border-sky-300/30"
+                onChange={(event) =>
+                  setLabel(
+                    event.target.value
+                      .toUpperCase()
+                      .replace(/\s+/g, "_"),
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void sendMarker();
+                  }
+                }}
+                className="research-input"
               />
             </label>
+
             <div className="grid grid-cols-2 gap-2">
-              {["DREAM_ONSET", "AWAKEN", "LUCID_SIGNAL", "REPORT_END"].map((preset) => (
-                <button key={preset} onClick={() => setLabel(preset)} className="button-secondary justify-center text-[9px]">{preset}</button>
+              {[
+                "DREAM_ONSET",
+                "AWAKEN",
+                "LUCID_SIGNAL",
+                "REPORT_END",
+              ].map((preset) => (
+                <button
+                  key={preset}
+                  onClick={() => setLabel(preset)}
+                  className="button-secondary justify-center text-[9px]"
+                >
+                  {preset}
+                </button>
               ))}
             </div>
+
             <button
-              onClick={sendMarker}
+              onClick={() => void sendMarker()}
               disabled={!armed || sending}
               className="button-primary w-full disabled:cursor-not-allowed disabled:opacity-40"
             >
-              <Send size={13} /> {sending ? "Sending..." : armed ? "Emit marker" : "Arm marker plane first"}
+              <Send size={13} />
+              {sending
+                ? "Sending..."
+                : armed
+                  ? "Emit marker"
+                  : "Arm marker plane first"}
             </button>
+
             <div className="operator-note">
-              Clock sync: {clockSync.ready
-                ? `±${clockSync.uncertaintyMs?.toFixed(2) ?? "—"} ms · ${clockSync.clockDomain}`
-                : "not synchronized"}. WebRTC control is preferred; HTTP is the fallback. Hardware triggers remain the reference when a protocol needs tighter timing than the measured uncertainty.
+              {clockSync.ready
+                ? "SOFTWARE_SYNCED · ±" +
+                  (
+                    clockSync.uncertaintyMs ?? 0
+                  ).toFixed(2) +
+                  " ms · " +
+                  clockSync.clockDomain
+                : "SOFTWARE_UNSYNCED · browser timing is not authoritative"}
             </div>
           </div>
-        </Panel>
-
-        <Panel>
-          <SectionHeader eyebrow="Event timeline" title="Current session" action={<span className="tag-muted">{events.length} EVENTS</span>} />
-          {events.length ? (
-            <div className="divide-y divide-white/[.055]">
-              {events.map((event, index) => (
-                <div key={event.id} className="grid grid-cols-[28px_1fr_auto] items-center gap-3 px-4 py-3">
-                  <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/[.07] bg-black/20 text-slate-500">
-                    {index === 0 ? <Play size={12} /> : <CircleDot size={11} />}
-                  </span>
-                  <div>
-                    <div className="font-mono text-xs text-slate-300">{event.label}</div>
-                    <div className="mt-1 text-[10px] text-slate-650">
-                      {new Date(event.timestamp * 1000).toISOString()} · {event.clock_domain || "unknown clock"}
-                    </div>
-                  </div>
-                  <span className={`tag-muted ${event.source === "gateway" ? "!text-emerald-300" : ""}`}>{event.source}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="flex min-h-72 flex-col items-center justify-center px-6 text-center">
-              <TimerReset size={24} className="text-slate-700" />
-              <p className="mt-3 text-xs text-slate-600">No markers in this session.</p>
-              <button onClick={() => setLabel("SESSION_START")} className="mt-4 button-secondary"><Plus size={12} /> Prepare session start</button>
-            </div>
-          )}
         </Panel>
       </div>
 
       <Panel>
-        <SectionHeader eyebrow="Protocol skeleton" title="Immediate reinstatement study" />
-        <div className="grid gap-3 p-4 lg:grid-cols-5">
-          {[
-            ["01", "Dream", "Natural or lucid dream state."],
-            ["02", "Wake", "Controlled interruption with exact timestamp."],
-            ["03", "Report", "Immediate raw report before outside information."],
-            ["04", "Return", "Return to sleep under defined delay condition."],
-            ["05", "Score", "Pre-registered continuation criteria and blinded comparison."],
-          ].map(([step, title, body]) => (
-            <div key={step} className="rounded-xl border border-white/[.07] bg-black/10 p-4">
-              <div className="font-mono text-[10px] text-sky-300">{step}</div>
-              <div className="mt-4 text-xs font-medium text-slate-300">{title}</div>
-              <p className="mt-2 text-[11px] leading-5 text-slate-600">{body}</p>
-            </div>
-          ))}
+        <SectionHeader
+          eyebrow="Reinstatement trial"
+          title="Controlled interruption protocol"
+          description="Create a prospective trial before the awakening. The delay condition and intention condition are fixed before scoring."
+          action={
+            activeTrial ? (
+              <span className="tag">
+                TRIAL ACTIVE
+              </span>
+            ) : (
+              <span className="tag-muted">
+                READY
+              </span>
+            )
+          }
+        />
+
+        <div className="reinstatement-grid">
+          <div className="reinstatement-control">
+            <label className="field-label">
+              <span>Return-to-sleep delay</span>
+              <select
+                className="research-input"
+                value={delaySeconds}
+                disabled={Boolean(activeTrial)}
+                onChange={(event) =>
+                  setDelaySeconds(
+                    Number(event.target.value),
+                  )
+                }
+              >
+                {delayConditions.map((delay) => (
+                  <option key={delay} value={delay}>
+                    {delay < 60
+                      ? delay + " seconds"
+                      : delay / 60 + " minutes"}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button
+              className={
+                intentionCondition
+                  ? "dataset-control-card dataset-control-card-active mt-3 w-full"
+                  : "dataset-control-card mt-3 w-full"
+              }
+              disabled={Boolean(activeTrial)}
+              onClick={() =>
+                setIntentionCondition(
+                  (value) => !value,
+                )
+              }
+            >
+              <span>Intention condition</span>
+              <div className="mt-2 text-xs">
+                {intentionCondition
+                  ? "Pre-registered continuation intention"
+                  : "No deliberate continuation instruction"}
+              </div>
+            </button>
+
+            <label className="field-label mt-3 block">
+              <span>Pre-awakening Dream ID</span>
+              <input
+                className="research-input"
+                value={preDreamId}
+                disabled={Boolean(activeTrial)}
+                onChange={(event) =>
+                  setPreDreamId(event.target.value)
+                }
+                placeholder="Optional Dataset Zero ID"
+              />
+            </label>
+
+            {!activeTrial ? (
+              <button
+                className="button-primary mt-4 w-full"
+                onClick={() => void startTrial()}
+              >
+                <Play size={13} />
+                Pre-register trial
+              </button>
+            ) : (
+              <button
+                className="button-secondary mt-4 w-full"
+                disabled={!armed}
+                onClick={() => void markAwakening()}
+              >
+                <TimerReset size={13} />
+                Emit AWAKEN marker
+              </button>
+            )}
+          </div>
+
+          <div className="reinstatement-score">
+            {activeTrial ? (
+              <>
+                <div className="program-label">
+                  Active trial
+                </div>
+                <div className="reinstatement-active">
+                  <strong>
+                    {activeTrial.delaySeconds < 60
+                      ? activeTrial.delaySeconds +
+                        " s"
+                      : activeTrial.delaySeconds /
+                          60 +
+                        " min"}
+                  </strong>
+                  <span>
+                    {activeTrial.intentionCondition
+                      ? "INTENTION"
+                      : "CONTROL"}
+                  </span>
+                </div>
+
+                <label className="field-label mt-4 block">
+                  <span>
+                    Post-return Dream ID
+                  </span>
+                  <input
+                    className="research-input"
+                    value={postDreamId}
+                    onChange={(event) =>
+                      setPostDreamId(
+                        event.target.value,
+                      )
+                    }
+                  />
+                </label>
+
+                <label className="field-label mt-4 block">
+                  <span>
+                    Continuity score ·{" "}
+                    {continuityScore}/5
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="5"
+                    value={continuityScore}
+                    onChange={(event) =>
+                      setContinuityScore(
+                        Number(event.target.value),
+                      )
+                    }
+                    className="mt-2 w-full"
+                  />
+                </label>
+
+                <button
+                  className={
+                    blinded
+                      ? "mode-pill mode-pill-live mt-3"
+                      : "mode-pill mt-3"
+                  }
+                  onClick={() =>
+                    setBlinded((value) => !value)
+                  }
+                >
+                  {blinded
+                    ? "BLINDED SCORE"
+                    : "UNBLINDED"}
+                </button>
+
+                <label className="field-label mt-4 block">
+                  <span>Scoring notes</span>
+                  <textarea
+                    className="dataset-textarea mt-2"
+                    rows={4}
+                    value={notes}
+                    onChange={(event) =>
+                      setNotes(event.target.value)
+                    }
+                  />
+                </label>
+
+                <button
+                  className="button-primary mt-4 w-full"
+                  onClick={() =>
+                    void completeTrial()
+                  }
+                >
+                  Complete trial
+                </button>
+              </>
+            ) : (
+              <div className="research-empty">
+                No active trial. Fix the delay
+                condition before awakening, then
+                score the post-return report against
+                the pre-registered continuity rule.
+              </div>
+            )}
+          </div>
         </div>
       </Panel>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="M2 local dataset"
+          title="Delay-response summary"
+          action={
+            <span className="tag-muted">
+              {summary.length} CONDITIONS
+            </span>
+          }
+        />
+
+        {summary.length ? (
+          <div className="reinstatement-summary">
+            {summary.map((row) => (
+              <div key={row.delaySeconds}>
+                <span>
+                  {row.delaySeconds < 60
+                    ? row.delaySeconds + " s"
+                    : row.delaySeconds / 60 + " min"}
+                </span>
+                <strong>
+                  mean {row.meanScore.toFixed(2)}/5
+                </strong>
+                <small>
+                  {(row.continuationRate * 100).toFixed(0)}
+                  % ≥3 · n={row.n}
+                </small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="research-empty m-4">
+            Completed trials appear here without
+            uploading the reports or scores.
+          </div>
+        )}
+
+        {trials.length ? (
+          <div className="divide-y divide-white/[.055] border-t border-white/[.055]">
+            {trials.slice(0, 20).map((trial) => (
+              <div
+                key={trial.id}
+                className="reinstatement-trial-row"
+              >
+                <div>
+                  <strong>
+                    {trial.delaySeconds}s ·{" "}
+                    {trial.intentionCondition
+                      ? "INTENTION"
+                      : "CONTROL"}
+                  </strong>
+                  <span>
+                    {trial.continuityScore === null
+                      ? "PENDING"
+                      : "SCORE " +
+                        trial.continuityScore +
+                        "/5"}
+                    {" · "}
+                    {trial.blinded
+                      ? "BLINDED"
+                      : "UNBLINDED"}
+                  </span>
+                </div>
+                <button
+                  className="button-icon"
+                  title="Delete local trial"
+                  onClick={() =>
+                    void removeTrial(trial.id)
+                  }
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </Panel>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="Event timeline"
+          title="Current browser session"
+          action={
+            <span className="tag-muted">
+              {events.length} EVENTS
+            </span>
+          }
+        />
+
+        {events.length ? (
+          <div className="divide-y divide-white/[.055]">
+            {events.map((event, index) => (
+              <div
+                key={event.id}
+                className="grid grid-cols-[28px_1fr_auto] items-center gap-3 px-4 py-3"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/[.07] bg-black/20 text-slate-500">
+                  {index === 0 ? (
+                    <Play size={12} />
+                  ) : (
+                    <CircleDot size={11} />
+                  )}
+                </span>
+                <div>
+                  <div className="font-mono text-xs text-slate-300">
+                    {event.label}
+                  </div>
+                  <div className="mt-1 text-[10px] text-slate-650">
+                    {event.clock_domain ||
+                      "unknown clock"}
+                    {" · "}
+                    {event.timestamp_method ||
+                      "unknown method"}
+                    {event.sync_uncertainty_ms != null
+                      ? " · ±" +
+                        event.sync_uncertainty_ms.toFixed(
+                          2,
+                        ) +
+                        " ms"
+                      : ""}
+                  </div>
+                </div>
+                <span
+                  className={
+                    event.source === "gateway"
+                      ? "tag-muted !text-emerald-300"
+                      : "tag-muted"
+                  }
+                >
+                  {event.source}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="flex min-h-48 flex-col items-center justify-center px-6 text-center">
+            <TimerReset
+              size={24}
+              className="text-slate-700"
+            />
+            <p className="mt-3 text-xs text-slate-600">
+              No markers in this browser session.
+            </p>
+            <button
+              onClick={() =>
+                setLabel("SESSION_START")
+              }
+              className="mt-4 button-secondary"
+            >
+              <Plus size={12} />
+              Prepare session start
+            </button>
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function ExperimentMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="experiment-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }

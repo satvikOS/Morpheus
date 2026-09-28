@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
+import struct
 import threading
 import time
 import uuid
@@ -43,7 +45,7 @@ except Exception:
     RTCPeerConnection = None
     RTCSessionDescription = None
 
-app = FastAPI(title="Morpheus Signal Gateway", version="0.5.0")
+app = FastAPI(title="Morpheus Signal Gateway", version="0.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,9 +60,161 @@ _marker_outlet: Any = None
 WEBRTC_PEERS: set[Any] = set()
 WEBRTC_TASKS: set[asyncio.Task[Any]] = set()
 MARKER_SEQUENCE = 0
+STREAM_SEQUENCES: dict[str, int] = {}
+NATIVE_SUBSCRIBERS: set[asyncio.Queue[bytes]] = set()
+NATIVE_LAST_META: dict[str, Any] = {}
+NATIVE_TRANSPORT: Any = None
+MRPH_MAGIC = b"MRPH"
+MRPH_VERSION = 1
+MRPH_FLAG_SIMULATED = 1
+MRPH_HEADER = struct.Struct("<4sHHIIfHH")
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 HOSTED_RUNTIME = os.environ.get("VERCEL") == "1"
 CLOCK_STABLE_FOR_MARKERS = not HOSTED_RUNTIME
+
+
+def _stream_hash(value: str) -> int:
+    current = 2166136261
+    for byte in value.encode("utf-8", errors="replace"):
+        current ^= byte
+        current = (current * 16777619) & 0xFFFFFFFF
+    return current
+
+
+def _next_stream_sequence(stream: str) -> int:
+    value = STREAM_SEQUENCES.get(stream, 0)
+    STREAM_SEQUENCES[stream] = (value + 1) & 0xFFFFFFFF
+    return value
+
+
+def encode_sample_batch(
+    stream: str,
+    sample_rate: float,
+    samples: list[list[float]],
+    timestamps: list[float],
+    simulated: bool,
+) -> bytes:
+    if not samples or len(samples) != len(timestamps):
+        raise ValueError("Sample batch must include matching frames and timestamps.")
+
+    channel_count = len(samples[0])
+    if channel_count < 1 or channel_count > 65535:
+        raise ValueError("Unsupported channel count.")
+
+    for frame in samples:
+        if len(frame) != channel_count:
+            raise ValueError("All sample frames must have the same channel count.")
+
+    frame_count = len(samples)
+    flags = MRPH_FLAG_SIMULATED if simulated else 0
+    header = MRPH_HEADER.pack(
+        MRPH_MAGIC,
+        MRPH_VERSION,
+        flags,
+        _next_stream_sequence(stream),
+        _stream_hash(stream),
+        float(sample_rate or 0.0),
+        channel_count,
+        frame_count,
+    )
+
+    payload = bytearray(header)
+    for timestamp, frame in zip(timestamps, samples, strict=True):
+        payload.extend(struct.pack("<d", float(timestamp)))
+        payload.extend(struct.pack(f"<{channel_count}f", *[float(value) for value in frame]))
+    return bytes(payload)
+
+
+def _record_batch(
+    stream: str,
+    samples: list[list[float]],
+    timestamps: list[float],
+    simulated: bool,
+) -> None:
+    for sample, timestamp in zip(samples, timestamps, strict=True):
+        RECORDER.write_sample(stream, float(timestamp), sample, simulated)
+
+
+class NativeUdpProtocol(asyncio.DatagramProtocol):
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        if len(data) < MRPH_HEADER.size:
+            return
+        try:
+            magic, version, flags, sequence, stream_id, sample_rate, channels, frames = MRPH_HEADER.unpack_from(data, 0)
+        except struct.error:
+            return
+        if magic != MRPH_MAGIC or version != MRPH_VERSION:
+            return
+
+        NATIVE_LAST_META.update(
+            {
+                "name": "Morpheus Native Gateway",
+                "type": "Neurophysiology",
+                "channel_count": int(channels),
+                "nominal_srate": float(sample_rate),
+                "channel_format": "float32",
+                "source_id": "morpheus-native",
+                "uid": f"morpheus-native-{stream_id:08x}",
+                "hostname": str(addr[0]) if isinstance(addr, tuple) and addr else "local",
+                "channel_labels": [f"CH{index + 1:03d}" for index in range(int(channels))],
+                "channel_units": ["" for _ in range(int(channels))],
+                "protocol": "mrph-v1",
+                "sequence": int(sequence),
+                "frames_per_packet": int(frames),
+                "simulated": bool(flags & MRPH_FLAG_SIMULATED),
+            }
+        )
+
+        stale: list[asyncio.Queue[bytes]] = []
+        for queue in tuple(NATIVE_SUBSCRIBERS):
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                    queue.put_nowait(data)
+                except Exception:
+                    stale.append(queue)
+
+        for queue in stale:
+            NATIVE_SUBSCRIBERS.discard(queue)
+
+
+async def _start_native_udp_bridge() -> None:
+    global NATIVE_TRANSPORT
+    bind = os.environ.get("MORPHEUS_NATIVE_UDP_BIND", "").strip()
+    if not bind or HOSTED_RUNTIME:
+        return
+
+    host, sep, port_text = bind.rpartition(":")
+    if not sep:
+        host = "127.0.0.1"
+        port_text = bind
+
+    loop = asyncio.get_running_loop()
+    transport, _ = await loop.create_datagram_endpoint(
+        NativeUdpProtocol,
+        local_addr=(host or "127.0.0.1", int(port_text)),
+    )
+    NATIVE_TRANSPORT = transport
+
+
+@app.on_event("startup")
+async def startup_native_bridge() -> None:
+    try:
+        await _start_native_udp_bridge()
+    except Exception:
+        # The browser/LSL gateway remains usable if the optional native bridge
+        # cannot bind. Capability reporting makes this state explicit.
+        pass
+
+
+@app.on_event("shutdown")
+async def shutdown_native_bridge() -> None:
+    global NATIVE_TRANSPORT
+    if NATIVE_TRANSPORT is not None:
+        NATIVE_TRANSPORT.close()
+        NATIVE_TRANSPORT = None
 
 
 class LocalRecorder:
@@ -318,7 +472,27 @@ def health() -> dict[str, Any]:
 @app.get("/streams")
 @app.get("/api/signal-gateway/streams")
 def streams() -> dict[str, Any]:
-    return {"streams": discover_lsl()}
+    discovered = discover_lsl()
+    if NATIVE_TRANSPORT is not None:
+        discovered.insert(
+            0,
+            NATIVE_LAST_META.copy()
+            if NATIVE_LAST_META
+            else {
+                "name": "Morpheus Native Gateway",
+                "type": "Neurophysiology",
+                "channel_count": 0,
+                "nominal_srate": 0,
+                "channel_format": "float32",
+                "source_id": "morpheus-native",
+                "uid": "morpheus-native",
+                "hostname": "local",
+                "channel_labels": [],
+                "channel_units": [],
+                "protocol": "mrph-v1",
+            },
+        )
+    return {"streams": discovered}
 
 
 @app.get("/clock")
@@ -356,6 +530,9 @@ def capabilities() -> dict[str, Any]:
         "lsl": resolve_streams is not None,
         "brainflow": BoardShim is not None,
         "websocket_samples": True,
+        "binary_batch_protocol": "mrph-v1",
+        "native_udp_bridge": NATIVE_TRANSPORT is not None,
+        "native_udp_bind": os.environ.get("MORPHEUS_NATIVE_UDP_BIND") if NATIVE_TRANSPORT is not None else None,
         "webrtc_data_channel": RTCPeerConnection is not None,
         "markers": True,
         "synthetic_fallback": True,
@@ -494,63 +671,108 @@ def recent_markers() -> dict[str, Any]:
 
 async def synthetic_stream(ws: WebSocket) -> None:
     phase = 0.0
+    sample_rate = 256.0
+    batch_size = 8
+
     while True:
         try:
-            now = time.time()
-            phase += 0.02
-            sample = [
-                0.31 * math.sin(phase * 6.2) + 0.07 * math.sin(phase * 14.5),
-                0.18 * math.sin(phase * 8.1 + 0.7),
-                0.11 * math.sin(phase * 3.3 + 1.2),
-                0.08 * math.sin(phase * 18.0 + 0.3),
-                0.16 * math.sin(phase * 5.1 + 1.8) + 0.04 * math.sin(phase * 21.0),
-                0.13 * math.sin(phase * 7.4 + 2.2),
-                0.09 * math.sin(phase * 11.6 + 0.9),
-                0.07 * math.sin(phase * 3.8 + 2.9),
-            ]
-            RECORDER.write_sample("Morpheus Synthetic Reference", now, sample, True)
-            await ws.send_text(
-                json.dumps(
-                    {
-                        "stream": "Morpheus Synthetic Reference",
-                        "ts": now,
-                        "channels": sample,
-                        "simulated": True,
-                    }
+            base = time.time()
+            frames: list[list[float]] = []
+            timestamps: list[float] = []
+
+            for frame_index in range(batch_size):
+                phase += 1.0 / sample_rate
+                sample = [
+                    0.31 * math.sin(2 * math.pi * 6.2 * phase) + 0.07 * math.sin(2 * math.pi * 14.5 * phase),
+                    0.18 * math.sin(2 * math.pi * 8.1 * phase + 0.7),
+                    0.11 * math.sin(2 * math.pi * 3.3 * phase + 1.2),
+                    0.08 * math.sin(2 * math.pi * 18.0 * phase + 0.3),
+                    0.16 * math.sin(2 * math.pi * 5.1 * phase + 1.8) + 0.04 * math.sin(2 * math.pi * 21.0 * phase),
+                    0.13 * math.sin(2 * math.pi * 7.4 * phase + 2.2),
+                    0.09 * math.sin(2 * math.pi * 11.6 * phase + 0.9),
+                    0.07 * math.sin(2 * math.pi * 3.8 * phase + 2.9),
+                ]
+                frames.append(sample)
+                timestamps.append(base + frame_index / sample_rate)
+
+            stream_name = "Morpheus Synthetic Reference"
+            _record_batch(stream_name, frames, timestamps, True)
+            await ws.send_bytes(
+                encode_sample_batch(
+                    stream_name,
+                    sample_rate,
+                    frames,
+                    timestamps,
+                    True,
                 )
             )
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(batch_size / sample_rate)
         except WebSocketDisconnect:
             return
 
 
 async def _synthetic_datachannel(channel: Any) -> None:
     phase = 0.0
+    sample_rate = 256.0
+    batch_size = 8
+    stream_name = "Morpheus Synthetic Reference"
+
     while getattr(channel, "readyState", "") == "open":
-        phase += 0.02
-        sample = [
-            0.31 * math.sin(phase * 6.2) + 0.07 * math.sin(phase * 14.5),
-            0.18 * math.sin(phase * 8.1 + 0.7),
-            0.11 * math.sin(phase * 3.3 + 1.2),
-            0.08 * math.sin(phase * 18.0 + 0.3),
-            0.16 * math.sin(phase * 5.1 + 1.8) + 0.04 * math.sin(phase * 21.0),
-            0.13 * math.sin(phase * 7.4 + 2.2),
-            0.09 * math.sin(phase * 11.6 + 0.9),
-            0.07 * math.sin(phase * 3.8 + 2.9),
-        ]
-        now = time.time()
+        base = time.time()
+        frames: list[list[float]] = []
+        timestamps: list[float] = []
+
+        for frame_index in range(batch_size):
+            phase += 1.0 / sample_rate
+            frames.append(
+                [
+                    0.31 * math.sin(2 * math.pi * 6.2 * phase) + 0.07 * math.sin(2 * math.pi * 14.5 * phase),
+                    0.18 * math.sin(2 * math.pi * 8.1 * phase + 0.7),
+                    0.11 * math.sin(2 * math.pi * 3.3 * phase + 1.2),
+                    0.08 * math.sin(2 * math.pi * 18.0 * phase + 0.3),
+                    0.16 * math.sin(2 * math.pi * 5.1 * phase + 1.8) + 0.04 * math.sin(2 * math.pi * 21.0 * phase),
+                    0.13 * math.sin(2 * math.pi * 7.4 * phase + 2.2),
+                    0.09 * math.sin(2 * math.pi * 11.6 * phase + 0.9),
+                    0.07 * math.sin(2 * math.pi * 3.8 * phase + 2.9),
+                ]
+            )
+            timestamps.append(base + frame_index / sample_rate)
+
+        _record_batch(stream_name, frames, timestamps, True)
         channel.send(
-            json.dumps(
-                {
-                    "stream": "Morpheus Synthetic Reference",
-                    "ts": now,
-                    "channels": sample,
-                    "simulated": True,
-                    "transport": "webrtc",
-                }
+            encode_sample_batch(
+                stream_name,
+                sample_rate,
+                frames,
+                timestamps,
+                True,
             )
         )
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(batch_size / sample_rate)
+
+
+async def _native_datachannel(channel: Any) -> None:
+    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+    NATIVE_SUBSCRIBERS.add(queue)
+    try:
+        while getattr(channel, "readyState", "") == "open":
+            packet = await queue.get()
+            channel.send(packet)
+    finally:
+        NATIVE_SUBSCRIBERS.discard(queue)
+
+
+async def _native_websocket(ws: WebSocket) -> None:
+    queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=8)
+    NATIVE_SUBSCRIBERS.add(queue)
+    try:
+        while True:
+            packet = await queue.get()
+            await ws.send_bytes(packet)
+    except WebSocketDisconnect:
+        return
+    finally:
+        NATIVE_SUBSCRIBERS.discard(queue)
 
 
 async def _lsl_datachannel(channel: Any, source_id: str | None) -> None:
@@ -587,26 +809,72 @@ async def _lsl_datachannel(channel: Any, source_id: str | None) -> None:
         return
 
     stream_name = selected.name()
+    sample_rate = float(selected.nominal_srate() or 0.0)
+    batch_max = max(1, min(64, int(sample_rate / 30) if sample_rate > 0 else 16))
+
     while getattr(channel, "readyState", "") == "open":
         try:
-            sample, timestamp = await asyncio.to_thread(inlet.pull_sample, 0.2)
-            if sample is None:
+            chunk, timestamps = await asyncio.to_thread(
+                inlet.pull_chunk,
+                0.2,
+                batch_max,
+            )
+            if not chunk:
                 await asyncio.sleep(0.001)
                 continue
 
-            channel_values = [float(value) for value in sample]
-            RECORDER.write_sample(stream_name, float(timestamp), channel_values, False)
+            frames = [[float(value) for value in frame] for frame in chunk]
+            times = [float(value) for value in timestamps]
+            _record_batch(stream_name, frames, times, False)
             channel.send(
-                json.dumps(
-                    {
-                        "stream": stream_name,
-                        "ts": float(timestamp),
-                        "channels": channel_values,
-                        "simulated": False,
-                        "transport": "webrtc",
-                    }
+                encode_sample_batch(
+                    stream_name,
+                    sample_rate,
+                    frames,
+                    times,
+                    False,
                 )
             )
+        except Exception:
+            await asyncio.sleep(0.01)
+
+
+async def _lsl_websocket(ws: WebSocket, selected: Any) -> None:
+    try:
+        inlet = StreamInlet(selected, max_buflen=2, recover=True)
+    except Exception:
+        await synthetic_stream(ws)
+        return
+
+    stream_name = selected.name()
+    sample_rate = float(selected.nominal_srate() or 0.0)
+    batch_max = max(1, min(64, int(sample_rate / 30) if sample_rate > 0 else 16))
+
+    while True:
+        try:
+            chunk, timestamps = await asyncio.to_thread(
+                inlet.pull_chunk,
+                0.2,
+                batch_max,
+            )
+            if not chunk:
+                await asyncio.sleep(0.002)
+                continue
+
+            frames = [[float(value) for value in frame] for frame in chunk]
+            times = [float(value) for value in timestamps]
+            _record_batch(stream_name, frames, times, False)
+            await ws.send_bytes(
+                encode_sample_batch(
+                    stream_name,
+                    sample_rate,
+                    frames,
+                    times,
+                    False,
+                )
+            )
+        except WebSocketDisconnect:
+            return
         except Exception:
             await asyncio.sleep(0.01)
 
@@ -631,7 +899,11 @@ async def webrtc_offer(offer: WebRTCOffer) -> Any:
         if channel.label == "morpheus-samples":
             @channel.on("open")
             def on_sample_open() -> None:
-                task = asyncio.create_task(_lsl_datachannel(channel, offer.source_id))
+                task = asyncio.create_task(
+                    _native_datachannel(channel)
+                    if offer.source_id == "morpheus-native" and NATIVE_TRANSPORT is not None
+                    else _lsl_datachannel(channel, offer.source_id)
+                )
                 WEBRTC_TASKS.add(task)
                 task.add_done_callback(WEBRTC_TASKS.discard)
             return
@@ -701,6 +973,10 @@ async def webrtc_offer(offer: WebRTCOffer) -> Any:
 async def websocket_samples(ws: WebSocket, source_id: str | None = None) -> None:
     await ws.accept()
 
+    if source_id == "morpheus-native" and NATIVE_TRANSPORT is not None:
+        await _native_websocket(ws)
+        return
+
     if resolve_streams is None or StreamInlet is None:
         await synthetic_stream(ws)
         return
@@ -727,37 +1003,7 @@ async def websocket_samples(ws: WebSocket, source_id: str | None = None) -> None
             discovered[0],
         )
 
-    try:
-        inlet = StreamInlet(selected, max_buflen=2, recover=True)
-    except Exception:
-        await synthetic_stream(ws)
-        return
-
-    stream_name = selected.name()
-
-    while True:
-        try:
-            sample, timestamp = await asyncio.to_thread(inlet.pull_sample, 0.2)
-            if sample is None:
-                await asyncio.sleep(0.004)
-                continue
-
-            channel_values = [float(value) for value in sample]
-            RECORDER.write_sample(stream_name, float(timestamp), channel_values, False)
-            await ws.send_text(
-                json.dumps(
-                    {
-                        "stream": stream_name,
-                        "ts": float(timestamp),
-                        "channels": channel_values,
-                        "simulated": False,
-                    }
-                )
-            )
-        except WebSocketDisconnect:
-            return
-        except Exception:
-            await asyncio.sleep(0.03)
+    await _lsl_websocket(ws, selected)
 
 
 @app.get("/")
@@ -765,6 +1011,6 @@ async def websocket_samples(ws: WebSocket, source_id: str | None = None) -> None
 def root() -> dict[str, str]:
     return {
         "service": "Morpheus Signal Gateway",
-        "version": "0.5.0",
+        "version": "0.7.0",
         "purpose": "Low-latency LSL acquisition, synchronization, and workstation relay",
     }

@@ -70,96 +70,202 @@ type VolumeData = {
 
 const niftiReader = niftiModule as unknown as NiftiReaderApi;
 
-function defaultPoints(count = 4800) {
-  const values = new Float32Array(count * 3);
-  for (let i = 0; i < count; i += 1) {
-    const phi = Math.acos(1 - (2 * (i + 0.5)) / count);
-    const theta = Math.PI * (1 + Math.sqrt(5)) * i;
-    const radialNoise =
-      1 +
-      0.07 * Math.sin(i * 0.73) +
-      0.035 * Math.cos(i * 1.91) +
-      0.018 * Math.sin(i * 3.17);
+function volumePointCloud(
+  volume: VolumeData,
+  maxPoints = 18000,
+) {
+  const [x, y, z] = volume.dims;
+  const total = x * y * z;
+  const stride = Math.max(
+    1,
+    Math.floor(Math.cbrt(total / Math.max(1, maxPoints))),
+  );
+  const points: number[] = [];
+  const largest = Math.max(x, y, z);
 
-    values[i * 3] =
-      Math.cos(theta) * Math.sin(phi) * 2.75 * radialNoise;
-    values[i * 3 + 1] = Math.cos(phi) * 2.05 * radialNoise;
-    values[i * 3 + 2] =
-      Math.sin(theta) * Math.sin(phi) * 2.33 * radialNoise;
+  for (let vz = 0; vz < z; vz += stride) {
+    for (let vy = 0; vy < y; vy += stride) {
+      for (let vx = 0; vx < x; vx += stride) {
+        const index = vx + vy * x + vz * x * y;
+        const value = volume.voxels[index] || 0;
+        if (value < 26) continue;
+
+        points.push(
+          ((vx / Math.max(1, x - 1)) - 0.5) * (x / largest) * 5.2,
+          ((vy / Math.max(1, y - 1)) - 0.5) * (y / largest) * 5.2,
+          ((vz / Math.max(1, z - 1)) - 0.5) * (z / largest) * 5.2,
+        );
+
+        if (points.length / 3 >= maxPoints) {
+          return new Float32Array(points);
+        }
+      }
+    }
   }
-  return values;
+
+  return new Float32Array(points);
 }
 
-function networkNodes() {
-  return Array.from({ length: 128 }, (_, i) => {
-    const angle = i * 2.3999632297;
-    const r = 1.05 + (i % 17) * 0.11;
-    return [
-      Math.cos(angle) * r,
-      ((i % 19) - 9) * 0.15,
-      Math.sin(angle) * r,
-    ] as [number, number, number];
-  });
+type RegionNode = {
+  position: [number, number, number];
+  weight: number;
+  label: number;
+};
+
+function deriveRegionTopology(
+  volume: VolumeData,
+  maxRegions = 96,
+) {
+  const [x, y, z] = volume.dims;
+  const largest = Math.max(x, y, z);
+  const bins = new Map<
+    number,
+    { x: number; y: number; z: number; n: number }
+  >();
+
+  const total = x * y * z;
+  const stride = Math.max(
+    1,
+    Math.floor(Math.cbrt(total / 450000)),
+  );
+
+  for (let vz = 0; vz < z; vz += stride) {
+    for (let vy = 0; vy < y; vy += stride) {
+      for (let vx = 0; vx < x; vx += stride) {
+        const value =
+          volume.voxels[vx + vy * x + vz * x * y] || 0;
+        if (value < 18) continue;
+
+        const label = Math.max(1, Math.round(value / 8));
+        const bin = bins.get(label) || {
+          x: 0,
+          y: 0,
+          z: 0,
+          n: 0,
+        };
+        bin.x += vx;
+        bin.y += vy;
+        bin.z += vz;
+        bin.n += 1;
+        bins.set(label, bin);
+      }
+    }
+  }
+
+  const nodes: RegionNode[] = Array.from(bins.entries())
+    .sort((a, b) => b[1].n - a[1].n)
+    .slice(0, maxRegions)
+    .map(([label, bin]) => ({
+      label,
+      weight: bin.n,
+      position: [
+        (((bin.x / bin.n) / Math.max(1, x - 1)) - 0.5) *
+          (x / largest) *
+          5.2,
+        (((bin.y / bin.n) / Math.max(1, y - 1)) - 0.5) *
+          (y / largest) *
+          5.2,
+        (((bin.z / bin.n) / Math.max(1, z - 1)) - 0.5) *
+          (z / largest) *
+          5.2,
+      ],
+    }));
+
+  const edges: Array<[RegionNode, RegionNode]> = [];
+
+  for (let index = 0; index < nodes.length; index += 1) {
+    const source = nodes[index];
+    const nearest = nodes
+      .map((target, targetIndex) => ({
+        target,
+        targetIndex,
+        distance:
+          targetIndex === index
+            ? Number.POSITIVE_INFINITY
+            : Math.hypot(
+                source.position[0] - target.position[0],
+                source.position[1] - target.position[1],
+                source.position[2] - target.position[2],
+              ),
+      }))
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 2);
+
+    for (const item of nearest) {
+      if (index < item.targetIndex) {
+        edges.push([source, item.target]);
+      }
+    }
+  }
+
+  return { nodes, edges };
 }
 
 function Atlas({ positions }: { positions: Float32Array }) {
-  return (
-    <>
-      <Points positions={positions} stride={3} frustumCulled>
-        <PointMaterial
-          transparent
-          color="#8ed7ff"
-          size={0.018}
-          sizeAttenuation
-          depthWrite={false}
-          opacity={0.76}
-        />
-      </Points>
-      <mesh scale={[2.82, 2.08, 2.4]}>
-        <icosahedronGeometry args={[1, 6]} />
-        <meshBasicMaterial
-          color="#253847"
-          wireframe
-          transparent
-          opacity={0.1}
-        />
-      </mesh>
-    </>
-  );
+  return positions.length ? (
+    <Points positions={positions} stride={3} frustumCulled>
+      <PointMaterial
+        transparent
+        color="#94d7ef"
+        size={0.022}
+        sizeAttenuation
+        depthWrite={false}
+        opacity={0.82}
+      />
+    </Points>
+  ) : null;
 }
 
-function Network() {
-  const nodes = useMemo(() => networkNodes(), []);
+function RegionTopology({
+  volume,
+}: {
+  volume: VolumeData;
+}) {
+  const topology = useMemo(
+    () => deriveRegionTopology(volume),
+    [volume],
+  );
+
+  const maxWeight = Math.max(
+    1,
+    ...topology.nodes.map((node) => node.weight),
+  );
 
   return (
     <>
-      {nodes.map((node, index) => (
-        <mesh key={index} position={node}>
-          <sphereGeometry args={[index % 11 === 0 ? 0.065 : 0.028, 10, 10]} />
+      {topology.nodes.map((node) => (
+        <mesh
+          key={node.label}
+          position={node.position}
+        >
+          <sphereGeometry
+            args={[
+              0.035 +
+                0.075 *
+                  Math.sqrt(node.weight / maxWeight),
+              12,
+              12,
+            ]}
+          />
           <meshStandardMaterial
-            color={index % 11 === 0 ? "#b4d7e8" : "#607a8a"}
-            emissive={index % 11 === 0 ? "#3b728e" : "#172a34"}
-            emissiveIntensity={index % 11 === 0 ? 0.8 : 0.25}
+            color="#8fc4da"
+            emissive="#315a6c"
+            emissiveIntensity={0.52}
+            roughness={0.5}
           />
         </mesh>
       ))}
-      {nodes.map((node, index) => {
-        const targets = [
-          nodes[(index * 7 + 5) % nodes.length],
-          nodes[(index * 13 + 23) % nodes.length],
-        ];
 
-        return targets.map((target, targetIndex) => (
-          <Line
-            key={`line-${index}-${targetIndex}`}
-            points={[node, target]}
-            color="#476273"
-            transparent
-            opacity={0.12}
-            lineWidth={0.45}
-          />
-        ));
-      })}
+      {topology.edges.map(([a, b], index) => (
+        <Line
+          key={index}
+          points={[a.position, b.position]}
+          color="#607985"
+          transparent
+          opacity={0.28}
+          lineWidth={0.5}
+        />
+      ))}
     </>
   );
 }
@@ -347,7 +453,9 @@ function Scene({
           />
         ) : null}
         {mode === "atlas" ? <Atlas positions={positions} /> : null}
-        {mode === "network" ? <Network /> : null}
+        {mode === "network" ? (
+          <RegionTopology volume={volume} />
+        ) : null}
 
         {showGrid ? (
           <Grid
@@ -412,8 +520,11 @@ export default function VisualLab({
   const [presetBusy, setPresetBusy] = useState("");
   const [importError, setImportError] = useState("");
 
-  const generated = useMemo(() => defaultPoints(), []);
-  const positions = imported ?? generated;
+  const derivedPositions = useMemo(
+    () => volumePointCloud(volume),
+    [volume],
+  );
+  const positions = imported ?? derivedPositions;
 
   const parseNifti = useCallback(
     async (
@@ -616,8 +727,8 @@ export default function VisualLab({
         <div className="visual-mode-stack">
           {[
             { id: "volume" as const, label: "Brain volume", icon: Layers3 },
-            { id: "atlas" as const, label: "Cortical field", icon: Waypoints },
-            { id: "network" as const, label: "Connectome", icon: Braces },
+            { id: "atlas" as const, label: "Voxel field", icon: Waypoints },
+            { id: "network" as const, label: "Region topology", icon: Braces },
           ].map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -765,9 +876,7 @@ export default function VisualLab({
             <Cpu size={12} /> Active dataset
           </div>
           <div className="visual-dataset-name">
-            {mode === "volume"
-              ? volume.name
-              : `${Math.floor(positions.length / 3).toLocaleString()} points`}
+            {volume.name}
           </div>
           {mode === "volume" ? (
             <>
@@ -785,7 +894,11 @@ export default function VisualLab({
                 </a>
               ) : null}
             </>
-          ) : null}
+          ) : (
+            <div className="visual-dataset-meta">
+              {Math.floor(positions.length / 3).toLocaleString()} volume-derived points · {volume.dims.join(" × ")}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -802,8 +915,8 @@ export default function VisualLab({
                   ? "Local NIfTI volume"
                   : "Engineering phantom"
               : mode === "atlas"
-                ? "Cortical point field"
-                : "Connectome topology"}
+                ? "Volume-derived voxel field"
+                : "Volume-derived region topology"}
           </strong>
         </div>
 

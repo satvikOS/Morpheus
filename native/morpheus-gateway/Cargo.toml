@@ -1,0 +1,17 @@
+[package]
+name = "morpheus-gateway"
+version = "0.7.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native acquisition, packetization and recording runtime for Morpheus"
+
+[dependencies]
+morpheus-core = { path = "../morpheus-core" }
+sha2 = "0.10"
+ctrlc = "3.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"

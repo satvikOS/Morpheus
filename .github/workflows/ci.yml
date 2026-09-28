@@ -53,6 +53,7 @@ jobs:
         run: |
           python -m py_compile services/signal-gateway/app/main.py
           python -m py_compile services/signal-gateway/tools/jsonl_to_nwb.py
+          python -m py_compile services/signal-gateway/tools/mrph_to_nwb.py
 
       - name: Validate JSON schemas
         run: |
@@ -65,7 +66,7 @@ jobs:
           PY
 
   native-core:
-    name: Rust native core
+    name: Rust native engine
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -75,5 +76,8 @@ jobs:
       - name: Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test native ring buffer
+      - name: Test native signal, protocol and DSP core
         run: cargo test --manifest-path native/morpheus-core/Cargo.toml
+
+      - name: Compile native gateway
+        run: cargo check --manifest-path native/morpheus-gateway/Cargo.toml

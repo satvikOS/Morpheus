@@ -338,7 +338,7 @@ export default function DatasetZeroPanel() {
         <SectionHeader
           eyebrow="M1 local baseline"
           title="Recurrence candidates"
-          description="A deterministic local lexical, tag, and modality baseline ranks candidate dream pairs without uploading raw reports. It is a screening tool, not evidence that two dreams are the same episode."
+          description="A deterministic local lexical, tag, and modality baseline ranks candidate pairs and compares each observed score against non-matching corpus pairs. The permutation-style null is a screening statistic, not evidence that two dreams are the same episode."
           action={<span className="tag-muted">{candidates.length} PAIRS</span>}
         />
         {candidates.length ? (
@@ -346,7 +346,7 @@ export default function DatasetZeroPanel() {
             {candidates.map((pair) => (
               <div
                 key={`${pair.a}-${pair.b}`}
-                className="grid gap-3 px-4 py-3 lg:grid-cols-[1fr_1fr_100px_1.2fr] lg:items-center"
+                className="grid gap-3 px-4 py-3 lg:grid-cols-[1fr_1fr_90px_110px_1.2fr] lg:items-center"
               >
                 <span className="truncate font-mono text-[10px] text-slate-400">
                   {pair.a}
@@ -356,6 +356,11 @@ export default function DatasetZeroPanel() {
                 </span>
                 <span className="font-mono text-xs text-sky-200">
                   {(pair.score * 100).toFixed(1)}%
+                </span>
+                <span className="font-mono text-[10px] text-slate-500">
+                  {pair.permutationP != null
+                    ? "p=" + pair.permutationP.toFixed(3)
+                    : "null n/a"}
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {pair.sharedTokens.length ? (

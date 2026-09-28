@@ -25,6 +25,10 @@ import PublicDataGraph, {
   type KnowledgeRecord,
 } from "./public-data-graph";
 import {
+  listKnowledgeRecords,
+  upsertKnowledgeRecords,
+} from "@/lib/public-graph-store";
+import {
   EmptyState,
   Panel,
   SectionHeader,
@@ -58,6 +62,7 @@ export default function PublicDataPanel() {
   const [ingestCycles, setIngestCycles] = useState(0);
   const [newRecords, setNewRecords] = useState(0);
   const [lastIngest, setLastIngest] = useState("");
+  const [graphLoaded, setGraphLoaded] = useState(false);
 
   const mergeIntoGraph = useCallback(
     (nextSources: PublicDataSource[]) => {
@@ -85,8 +90,12 @@ export default function PublicDataPanel() {
         );
         setNewRecords(additions.length);
 
+        if (additions.length) {
+          void upsertKnowledgeRecords(additions);
+        }
+
         const merged = [...current, ...additions];
-        return merged.slice(-420);
+        return merged.slice(-1200);
       });
       setIngestCycles((value) => value + 1);
       setLastIngest(new Date().toISOString());
@@ -131,8 +140,27 @@ export default function PublicDataPanel() {
   );
 
   useEffect(() => {
+    let active = true;
+
+    void listKnowledgeRecords()
+      .then((stored) => {
+        if (!active) return;
+        setRecords(stored);
+        setGraphLoaded(true);
+      })
+      .catch(() => {
+        if (active) setGraphLoaded(true);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!graphLoaded) return;
     void search("sleep");
-  }, [search]);
+  }, [graphLoaded, search]);
 
   useEffect(() => {
     if (!live) return;
@@ -245,7 +273,7 @@ export default function PublicDataPanel() {
 
           <div className="public-ingest-line">
             <span>
-              Retained graph records: {records.length}
+              Persistent graph records: {records.length}
             </span>
             <span>
               Last ingest:{" "}
@@ -254,7 +282,7 @@ export default function PublicDataPanel() {
                 : "—"}
             </span>
             <span>
-              Poll cadence: {live ? "15 s" : "paused"}
+              Poll cadence: {live ? "15 s" : "paused"} · IndexedDB retained
             </span>
           </div>
         </div>
