@@ -163,3 +163,35 @@ Initial work is observational, computational and non-invasive. Invasive procedur
 ## License
 
 Apache-2.0 for code. Dataset licenses and data-use restrictions remain source-specific.
+
+
+## v0.4 workstation architecture
+
+Morpheus v0.4 moves the live display path away from React state:
+
+```text
+LSL / BrainFlow
+      |
+ local gateway
+      |
+      +---- WebRTC DataChannel (preferred local path)
+      |          |
+      |          v
+      |   SharedArrayBuffer ring
+      |          |
+      |          v
+      |      WebGL2 scope
+      |
+      +---- Worker-owned WebSocket fallback
+                 |
+                 v
+          SharedArrayBuffer ring
+```
+
+The browser UI reads bounded signal windows from shared memory. React receives low-rate snapshots for diagnostics/model-worker summaries rather than every biosignal packet.
+
+The default screen is now a multi-pane operational workspace so acquisition, marker control, spatial visualization, and critical system state remain simultaneously visible. A persistent evidence boundary clearly differentiates live acquisition, simulation, and idle states.
+
+Dataset Zero now uses IndexedDB for the local text corpus and a press-and-hold sealing interlock. Continuous biosignal data remains outside browser storage.
+
+The local gateway can be containerized, can expose an optional WebRTC data channel when the local dependency profile is installed, and includes an offline JSONL-to-NWB conversion path.
