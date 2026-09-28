@@ -5,6 +5,7 @@ const sources = [
   { id: "openneuro", label: "OpenNeuro", route: "/api/public-data/openneuro" },
   { id: "neurovault", label: "NeuroVault", route: "/api/public-data/neurovault" },
   { id: "allen", label: "Allen Brain Atlas", route: "/api/public-data/allen" },
+  { id: "zenodo", label: "Zenodo", route: "/api/public-data/zenodo" },
 ];
 
 export async function GET(request: NextRequest) {
