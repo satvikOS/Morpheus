@@ -431,7 +431,9 @@ export default function Home() {
               <ExperimentsPanel gateway={gateway} />
             ) : null}
             {view === "programs" ? <ResearchProgramsPanel /> : null}
-            {view === "models" ? <ModelWorkersPanel samples={samples} /> : null}
+            {view === "models" ? (
+              <ModelWorkersPanel samples={samples} channelSamples={channelSamples} />
+            ) : null}
             {view === "simulation" ? <SimulationPanel /> : null}
             {view === "public-data" ? <PublicDataPanel /> : null}
             {view === "visual" ? <VisualLab /> : null}
