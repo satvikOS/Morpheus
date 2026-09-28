@@ -1,28 +1,25 @@
 {
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
     "frontend": {
       "root": ".",
-      "framework": "nextjs",
-      "buildCommand": "npm run build",
-      "installCommand": "npm install"
+      "framework": "nextjs"
     },
     "signal-gateway": {
       "root": "services/signal-gateway",
-      "runtime": "python3.11"
+      "entrypoint": "app.main:app"
     }
   },
   "rewrites": [
     {
-      "source": "/api/signal-gateway/:path*",
+      "source": "/api/signal-gateway/(.*)",
       "destination": {
-        "type": "service",
         "service": "signal-gateway"
       }
     },
     {
-      "source": "/:path*",
+      "source": "/(.*)",
       "destination": {
-        "type": "service",
         "service": "frontend"
       }
     }
