@@ -20,12 +20,14 @@ try:
         StreamInfo as LSLStreamInfo,
         StreamInlet,
         StreamOutlet,
+        local_clock,
         resolve_streams,
     )
 except Exception:
     LSLStreamInfo = None
     StreamInlet = None
     StreamOutlet = None
+    local_clock = None
     resolve_streams = None
 
 try:
@@ -180,16 +182,38 @@ def discover_lsl() -> list[dict[str, Any]]:
     except Exception:
         return []
 
-    return [
-        {
-            "name": stream.name(),
-            "type": stream.type(),
-            "channel_count": stream.channel_count(),
-            "nominal_srate": stream.nominal_srate(),
-            "source_id": stream.source_id() or f"{stream.name()}:{stream.uid()}",
-        }
-        for stream in discovered
-    ]
+    results: list[dict[str, Any]] = []
+    for stream in discovered:
+        labels: list[str] = []
+        units: list[str] = []
+        try:
+            channel = stream.desc().child("channels").child("channel")
+            for _ in range(int(stream.channel_count() or 0)):
+                if channel.empty():
+                    break
+                labels.append(channel.child_value("label") or f"CH{len(labels) + 1:02d}")
+                units.append(channel.child_value("unit") or "")
+                channel = channel.next_sibling()
+        except Exception:
+            labels = []
+            units = []
+
+        results.append(
+            {
+                "name": stream.name(),
+                "type": stream.type(),
+                "channel_count": stream.channel_count(),
+                "nominal_srate": stream.nominal_srate(),
+                "channel_format": stream.channel_format(),
+                "source_id": stream.source_id() or f"{stream.name()}:{stream.uid()}",
+                "uid": stream.uid(),
+                "hostname": stream.hostname(),
+                "channel_labels": labels,
+                "channel_units": units,
+            }
+        )
+
+    return results
 
 
 def get_marker_outlet() -> Any:
@@ -306,10 +330,15 @@ def recording_stop() -> dict[str, Any]:
 @app.post("/markers")
 @app.post("/api/signal-gateway/markers")
 def markers(marker: MarkerRequest) -> dict[str, Any]:
-    ts = float(marker.timestamp or time.time())
+    browser_timestamp = float(marker.timestamp) if marker.timestamp is not None else None
+    authoritative_timestamp = float(local_clock()) if local_clock is not None else time.time()
+    wall_timestamp = time.time()
     record = {
         "label": marker.label,
-        "timestamp": ts,
+        "timestamp": authoritative_timestamp,
+        "wall_timestamp": wall_timestamp,
+        "browser_timestamp": browser_timestamp,
+        "clock_domain": "lsl_local_clock" if local_clock is not None else "system_wall_clock",
         "payload": marker.payload or {},
     }
     MARKERS.appendleft(record)
@@ -319,7 +348,7 @@ def markers(marker: MarkerRequest) -> dict[str, Any]:
     emitted_to_lsl = False
     if outlet is not None:
         try:
-            outlet.push_sample([marker.label], timestamp=ts)
+            outlet.push_sample([marker.label], timestamp=authoritative_timestamp)
             emitted_to_lsl = True
         except Exception:
             emitted_to_lsl = False
