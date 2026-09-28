@@ -1,0 +1,16 @@
+[package]
+name = "morpheus-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Native bounded signal primitives for the Morpheus research workstation"
+
+[lib]
+name = "morpheus_core"
+path = "src/lib.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+panic = "abort"
