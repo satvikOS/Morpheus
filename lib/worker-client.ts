@@ -3,11 +3,19 @@ export type SignalAnalysis = {
   rms: number;
   peak: number;
   zeroCrossings: number;
+  flatlineRatio: number;
+  clippingRatio: number;
   bands: Record<string, number>;
 };
 
+export type MultiChannelAnalysis = {
+  metrics: SignalAnalysis;
+  channels: SignalAnalysis[];
+  latencyMs: number;
+};
+
 type Pending = {
-  resolve: (value: { metrics: SignalAnalysis; latencyMs: number }) => void;
+  resolve: (value: MultiChannelAnalysis) => void;
   reject: (reason?: unknown) => void;
 };
 
@@ -22,9 +30,15 @@ export class SignalWorkerClient {
       const message = event.data || {};
       const request = this.pending.get(message.id);
       if (!request) return;
+
       this.pending.delete(message.id);
+
       if (message.ok) {
-        request.resolve({ metrics: message.metrics, latencyMs: message.latencyMs });
+        request.resolve({
+          metrics: message.metrics,
+          channels: Array.isArray(message.channels) ? message.channels : [],
+          latencyMs: message.latencyMs,
+        });
       } else {
         request.reject(new Error(message.error || "Worker failed"));
       }
@@ -32,13 +46,26 @@ export class SignalWorkerClient {
   }
 
   analyze(samples: number[], sampleRate = 256) {
+    return this.analyzeChannels([samples], sampleRate);
+  }
+
+  analyzeChannels(channels: number[][], sampleRate = 256) {
     this.start();
-    if (!this.worker) return Promise.reject(new Error("Web Worker unavailable"));
+    if (!this.worker) {
+      return Promise.reject(new Error("Web Worker unavailable"));
+    }
 
     const id = crypto.randomUUID();
-    return new Promise<{ metrics: SignalAnalysis; latencyMs: number }>((resolve, reject) => {
+
+    return new Promise<MultiChannelAnalysis>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.worker?.postMessage({ id, type: "analyze", samples, sampleRate });
+      this.worker?.postMessage({
+        id,
+        type: "analyze",
+        channels: channels.slice(0, 32),
+        sampleRate,
+      });
+
       window.setTimeout(() => {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
@@ -50,7 +77,11 @@ export class SignalWorkerClient {
   stop() {
     this.worker?.terminate();
     this.worker = null;
-    for (const request of this.pending.values()) request.reject(new Error("Worker stopped"));
+
+    for (const request of this.pending.values()) {
+      request.reject(new Error("Worker stopped"));
+    }
+
     this.pending.clear();
   }
 }
