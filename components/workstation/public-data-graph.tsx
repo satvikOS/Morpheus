@@ -1,10 +1,24 @@
 "use client";
 
 import { Canvas, useFrame } from "@react-three/fiber";
-import { GizmoHelper, GizmoViewport, OrbitControls } from "@react-three/drei";
-import { Activity, Boxes, RadioTower } from "lucide-react";
+import {
+  GizmoHelper,
+  GizmoViewport,
+  Html,
+  OrbitControls,
+} from "@react-three/drei";
+import {
+  Activity,
+  Boxes,
+  Database,
+  RadioTower,
+} from "lucide-react";
 import * as THREE from "three";
-import { useEffect, useMemo, useRef } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
 import type {
   PublicDataSource,
   PublicDataset,
@@ -18,10 +32,12 @@ export type KnowledgeRecord = PublicDataset & {
 
 type GraphNode = {
   id: string;
+  label: string;
   kind: "source" | "dataset" | "modality";
   position: THREE.Vector3;
   color: THREE.Color;
   size: number;
+  fresh: boolean;
 };
 
 type GraphEdge = {
@@ -56,6 +72,7 @@ function buildGraph(
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const positions = new Map<string, THREE.Vector3>();
+  const now = Date.now();
 
   const sourceList = sources.length
     ? sources
@@ -64,7 +81,7 @@ function buildGraph(
           id: "public",
           label: "Public data",
           route: "",
-          ok: true,
+          ok: false,
           latency_ms: 0,
           datasets: [],
         },
@@ -73,56 +90,65 @@ function buildGraph(
   sourceList.forEach((source, index) => {
     const angle =
       (index / Math.max(1, sourceList.length)) * Math.PI * 2;
+    const ring = 4.7 + (index % 2) * 0.45;
     const position = new THREE.Vector3(
-      Math.cos(angle) * 4.6,
-      ((index % 3) - 1) * 0.7,
-      Math.sin(angle) * 4.6,
+      Math.cos(angle) * ring,
+      Math.sin(index * 1.31) * 1.1,
+      Math.sin(angle) * ring,
     );
 
     positions.set(`source:${source.id}`, position);
     nodes.push({
       id: `source:${source.id}`,
+      label: source.label,
       kind: "source",
       position,
       color: new THREE.Color(
-        source.ok ? "#9bc0d2" : "#666f76",
+        source.ok ? "#c0d6df" : "#6e777c",
       ),
-      size: 0.17,
+      size: source.ok ? 0.22 : 0.16,
+      fresh: false,
     });
   });
 
   const modalitySet = new Set<string>();
   for (const record of records) {
     for (const modality of record.modalities || []) {
-      if (modality.trim()) modalitySet.add(modality.trim().toLowerCase());
+      if (modality.trim()) {
+        modalitySet.add(modality.trim().toLowerCase());
+      }
     }
   }
 
-  const modalities = Array.from(modalitySet).slice(0, 24);
+  const modalities = Array.from(modalitySet).slice(0, 32);
   modalities.forEach((modality, index) => {
     const angle =
       (index / Math.max(1, modalities.length)) * Math.PI * 2;
+    const radius = 1.7 + (index % 3) * 0.22;
     const position = new THREE.Vector3(
-      Math.cos(angle) * 1.8,
-      Math.sin(index * 0.67) * 0.9,
-      Math.sin(angle) * 1.8,
+      Math.cos(angle) * radius,
+      Math.sin(index * 0.71) * 1.0,
+      Math.sin(angle) * radius,
     );
+
     positions.set(`modality:${modality}`, position);
     nodes.push({
       id: `modality:${modality}`,
+      label: modality,
       kind: "modality",
       position,
-      color: new THREE.Color("#788c93"),
-      size: 0.085,
+      color: new THREE.Color("#83979f"),
+      size: 0.105,
+      fresh: false,
     });
   });
 
-  for (const record of records.slice(-420)) {
+  for (const record of records.slice(-850)) {
     const source =
       positions.get(`source:${record.sourceId}`) ||
       new THREE.Vector3();
     const random = seededUnit(hash(record.graphKey));
-    const radius = 0.55 + random() * 1.75;
+    const radius = 0.65 + random() * 1.9;
     const theta = random() * Math.PI * 2;
     const phi = Math.acos(2 * random() - 1);
 
@@ -131,17 +157,22 @@ function buildGraph(
       .add(
         new THREE.Vector3(
           radius * Math.sin(phi) * Math.cos(theta),
-          radius * Math.cos(phi) * 0.72,
+          radius * Math.cos(phi) * 0.8,
           radius * Math.sin(phi) * Math.sin(theta),
         ),
       );
 
+    const fresh = now - record.firstSeenAt < 45_000;
     nodes.push({
       id: record.graphKey,
+      label: record.title || record.id,
       kind: "dataset",
       position,
-      color: new THREE.Color("#6f9eb5"),
-      size: 0.045,
+      color: new THREE.Color(
+        fresh ? "#b9e7f7" : "#6d9eb3",
+      ),
+      size: fresh ? 0.07 : 0.048,
+      fresh,
     });
 
     edges.push({
@@ -150,7 +181,7 @@ function buildGraph(
       kind: "source",
     });
 
-    for (const modality of (record.modalities || []).slice(0, 2)) {
+    for (const modality of (record.modalities || []).slice(0, 3)) {
       const target = positions.get(
         `modality:${modality.trim().toLowerCase()}`,
       );
@@ -177,20 +208,24 @@ function GraphScene({
   const sourceMesh = useRef<THREE.InstancedMesh>(null);
   const datasetMesh = useRef<THREE.InstancedMesh>(null);
   const modalityMesh = useRef<THREE.InstancedMesh>(null);
-  const rotation = useRef<THREE.Group>(null);
+  const graphGroup = useRef<THREE.Group>(null);
+
   const graph = useMemo(
     () => buildGraph(sources, records),
     [sources, records],
   );
 
-  const sourceNodes = graph.nodes.filter(
-    (node) => node.kind === "source",
+  const sourceNodes = useMemo(
+    () => graph.nodes.filter((node) => node.kind === "source"),
+    [graph.nodes],
   );
-  const datasetNodes = graph.nodes.filter(
-    (node) => node.kind === "dataset",
+  const datasetNodes = useMemo(
+    () => graph.nodes.filter((node) => node.kind === "dataset"),
+    [graph.nodes],
   );
-  const modalityNodes = graph.nodes.filter(
-    (node) => node.kind === "modality",
+  const modalityNodes = useMemo(
+    () => graph.nodes.filter((node) => node.kind === "modality"),
+    [graph.nodes],
   );
 
   useEffect(() => {
@@ -209,8 +244,11 @@ function GraphScene({
         mesh.setMatrixAt(index, dummy.matrix);
         mesh.setColorAt(index, node.color);
       });
+
       mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      if (mesh.instanceColor) {
+        mesh.instanceColor.needsUpdate = true;
+      }
     };
 
     apply(sourceMesh.current, sourceNodes);
@@ -220,6 +258,7 @@ function GraphScene({
 
   const linePositions = useMemo(() => {
     const array = new Float32Array(graph.edges.length * 6);
+
     graph.edges.forEach((edge, index) => {
       const offset = index * 6;
       array[offset] = edge.a.x;
@@ -229,43 +268,61 @@ function GraphScene({
       array[offset + 4] = edge.b.y;
       array[offset + 5] = edge.b.z;
     });
+
     return array;
   }, [graph.edges]);
 
-  useFrame((_, delta) => {
-    if (rotation.current) {
-      rotation.current.rotation.y += delta * 0.025;
+  useFrame((state, delta) => {
+    if (graphGroup.current) {
+      graphGroup.current.rotation.y += delta * 0.018;
+    }
+
+    const pulse = 1 + Math.sin(state.clock.elapsedTime * 4.2) * 0.12;
+    if (sourceMesh.current) {
+      sourceMesh.current.scale.setScalar(pulse);
     }
   });
 
   return (
     <>
-      <ambientLight intensity={0.78} />
-      <directionalLight position={[8, 10, 8]} intensity={0.8} />
+      <ambientLight intensity={0.9} />
+      <directionalLight
+        position={[8, 11, 7]}
+        intensity={1.15}
+      />
+      <pointLight
+        position={[-5, 2, -4]}
+        intensity={0.8}
+        color="#7ba1b2"
+      />
 
-      <group ref={rotation}>
-        <instancedMesh
-          ref={sourceMesh}
-          args={[undefined, undefined, Math.max(1, sourceNodes.length)]}
-        >
-          <icosahedronGeometry args={[1, 2]} />
-          <meshStandardMaterial
-            vertexColors
-            roughness={0.62}
-            metalness={0.08}
-          />
-        </instancedMesh>
+      <group ref={graphGroup}>
+        {sourceNodes.length ? (
+          <instancedMesh
+            ref={sourceMesh}
+            args={[undefined, undefined, sourceNodes.length]}
+          >
+            <icosahedronGeometry args={[1, 2]} />
+            <meshStandardMaterial
+              vertexColors
+              roughness={0.48}
+              metalness={0.13}
+            />
+          </instancedMesh>
+        ) : null}
 
         {datasetNodes.length ? (
           <instancedMesh
             ref={datasetMesh}
             args={[undefined, undefined, datasetNodes.length]}
           >
-            <sphereGeometry args={[1, 8, 8]} />
+            <sphereGeometry args={[1, 10, 10]} />
             <meshStandardMaterial
               vertexColors
-              roughness={0.76}
-              metalness={0.03}
+              roughness={0.68}
+              metalness={0.04}
+              emissive="#17303c"
+              emissiveIntensity={0.34}
             />
           </instancedMesh>
         ) : null}
@@ -284,28 +341,55 @@ function GraphScene({
           </instancedMesh>
         ) : null}
 
-        <lineSegments>
-          <bufferGeometry>
-            <bufferAttribute
-              attach="attributes-position"
-              args={[linePositions, 3]}
+        {linePositions.length ? (
+          <lineSegments>
+            <bufferGeometry>
+              <bufferAttribute
+                attach="attributes-position"
+                args={[linePositions, 3]}
+              />
+            </bufferGeometry>
+            <lineBasicMaterial
+              color="#41545e"
+              transparent
+              opacity={0.42}
             />
-          </bufferGeometry>
-          <lineBasicMaterial
-            color="#33454e"
-            transparent
-            opacity={0.34}
-          />
-        </lineSegments>
+          </lineSegments>
+        ) : null}
+
+        {sourceNodes.slice(0, 14).map((node) => (
+          <Html
+            key={node.id}
+            position={[
+              node.position.x,
+              node.position.y + 0.3,
+              node.position.z,
+            ]}
+            center
+            transform={false}
+            distanceFactor={9}
+            style={{
+              pointerEvents: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <div className="graph-source-label">
+              {node.label}
+            </div>
+          </Html>
+        ))}
       </group>
 
       <OrbitControls
         enableDamping
         dampingFactor={0.08}
-        minDistance={5}
-        maxDistance={24}
+        minDistance={4}
+        maxDistance={26}
       />
-      <GizmoHelper alignment="bottom-right" margin={[58, 58]}>
+      <GizmoHelper
+        alignment="bottom-right"
+        margin={[58, 58]}
+      >
         <GizmoViewport
           axisColors={["#a86666", "#71977b", "#667fa8"]}
           labelColor="#d8e0e8"
@@ -330,13 +414,20 @@ export default function PublicDataGraph({
 }) {
   const modalityCount = useMemo(() => {
     const values = new Set<string>();
+
     for (const record of records) {
       for (const modality of record.modalities || []) {
-        if (modality.trim()) values.add(modality.trim().toLowerCase());
+        if (modality.trim()) {
+          values.add(modality.trim().toLowerCase());
+        }
       }
     }
+
     return values.size;
   }, [records]);
+
+  const nodeCount =
+    sources.length + records.length + modalityCount;
 
   return (
     <div className="public-graph-shell">
@@ -347,9 +438,9 @@ export default function PublicDataGraph({
           </div>
           <h3>Live 3D research fabric</h3>
           <p>
-            Unique records are retained for this workstation session. Each
-            catalog refresh adds newly observed datasets and links them to
-            repository and modality nodes.
+            Repository, dataset and modality entities are retained
+            locally. New upstream records become new graph nodes
+            instead of replacing the previous ingest cycle.
           </p>
         </div>
 
@@ -357,13 +448,11 @@ export default function PublicDataGraph({
           <div>
             <Boxes size={12} />
             <span>Nodes</span>
-            <strong>
-              {sources.length + records.length + modalityCount}
-            </strong>
+            <strong>{nodeCount}</strong>
           </div>
           <div>
             <Activity size={12} />
-            <span>Ingested</span>
+            <span>New</span>
             <strong>+{newRecords}</strong>
           </div>
           <div>
@@ -372,7 +461,9 @@ export default function PublicDataGraph({
             <strong>{ingestCycles}</strong>
           </div>
           <div>
-            <span className={live ? "live-dot" : "idle-dot"} />
+            <span
+              className={live ? "live-dot" : "idle-dot"}
+            />
             <span>Fabric</span>
             <strong>{live ? "LIVE" : "PAUSED"}</strong>
           </div>
@@ -381,21 +472,47 @@ export default function PublicDataGraph({
 
       <div className="public-graph-canvas">
         <Canvas
-          dpr={[1, 1.5]}
-          camera={{ position: [0, 4.5, 11], fov: 46 }}
+          dpr={[1, 1.6]}
+          camera={{
+            position: [0, 4.8, 11.8],
+            fov: 45,
+          }}
           gl={{
             antialias: true,
             powerPreference: "high-performance",
           }}
-          onCreated={({ gl }) => gl.setClearColor("#050708")}
+          onCreated={({ gl }) =>
+            gl.setClearColor("#050708")
+          }
         >
-          <GraphScene sources={sources} records={records} />
+          <GraphScene
+            sources={sources}
+            records={records}
+          />
         </Canvas>
 
+        {!records.length ? (
+          <div className="public-graph-empty">
+            <Database size={18} />
+            <strong>Repository topology is live</strong>
+            <span>
+              Dataset nodes appear as anonymous public APIs
+              return records. No synthetic research records
+              are invented to fill the graph.
+            </span>
+          </div>
+        ) : null}
+
         <div className="public-graph-legend">
-          <span><i className="graph-source-dot" /> repository</span>
-          <span><i className="graph-dataset-dot" /> dataset/entity</span>
-          <span><i className="graph-modality-dot" /> modality</span>
+          <span>
+            <i className="graph-source-dot" /> repository
+          </span>
+          <span>
+            <i className="graph-dataset-dot" /> dataset/entity
+          </span>
+          <span>
+            <i className="graph-modality-dot" /> modality
+          </span>
         </div>
       </div>
     </div>

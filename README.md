@@ -1,197 +1,231 @@
 # Morpheus
 
-Morpheus is an experimental neurotechnology and computational neuroscience research workstation focused on one long-range question:
+Morpheus is an experimental neurotechnology and computational-neuroscience workstation studying how much information about subjective experience can be measured, identified, decoded and reconstructed from neural representations.
 
-> How much information about subjective human experience can be measured, identified, decoded, and reconstructed from persistent neural representations?
+Dreams are the first research domain because they combine internally generated imagery, sound, body sensation, emotion, narrative, memory and sometimes deliberate agency.
 
-Dreams are the first research domain because they combine internally generated imagery, sound, body sensation, emotion, narrative, memory, and sometimes deliberate agency.
+> Engineering execution is not scientific validation. Morpheus can begin with radical hypotheses, but every scientific claim must earn its evidence.
 
-## Current workstation
-
-The repository now contains a functioning research OS rather than a static concept UI.
-
-### Acquisition
-- FastAPI signal gateway
-- Lab Streaming Layer discovery and sample relay
-- BrainFlow hardware descriptor support when running locally
-- synchronized marker endpoint and LSL marker outlet
-- 8-channel synthetic reference stream when no hardware source is available
-- bounded multi-channel browser ring buffers
-- up to 16 simultaneously visualized channels
-- local-only session recording when `MORPHEUS_LOCAL_RECORDING_DIR` is configured
-
-### Dataset Zero / M0–M1
-- immutable raw dream reports
-- browser-side SHA-256 sealing
-- local-first storage and JSON export
-- separated annotations, tags, modalities, lucidity and confidence
-- deterministic local recurrence-candidate analysis
-
-### Experiment control / M2–M4
-- timestamped marker console
-- local recording control
-- reinstatement protocol surface
-- M0–M5 dependency registry
-- explicit null hypotheses and promotion gates
-
-### Public neuroscience data
-Unified adapters currently query:
-- DANDI
-- OpenNeuro
-- NeuroVault
-- Allen Brain Atlas
-- Zenodo
-
-A failing upstream adapter is isolated from the rest of the data fabric.
-
-### Model / compute workers
-- browser Web Worker DSP
-- time-domain metrics
-- reference spectral-band estimation
-- staged boundaries for local neural inference and GPU workers
-
-### Simulations
-Synthetic engineering fixtures include:
-- awake EEG-like multichannel signals
-- REM-like signals
-- N3 slow-wave signals
-- P300 ERP
-- BOLD HRF
-- connectivity signals
-- connectome graph phantom
-- 3D structural brain volume phantom
-
-Simulated data is explicitly marked synthetic and must not be interpreted as physiological ground truth.
-
-### 3D Neuro Space
-- Three.js / React Three Fiber
-- GPU 3D texture volume rendering
-- GLSL ray marching
-- NIfTI-1 / NIfTI-2 import
-- axial, coronal and sagittal multiplanar views
-- transfer-function controls
-- point-cloud atlas rendering
-- connectome rendering
-- scene workspace
-- interactive and UHD display modes
-
-The active production renderer is WebGL2-compatible. WebGPU capability may be detected by the browser, but Morpheus does not claim WebGPU is active until a dedicated WebGPU backend is implemented and validated.
-
-## Execution architecture
+## v0.7 execution architecture
 
 ```text
-                         MORPHEUS WORKSTATION
-                              Next.js
-                                 |
-       -----------------------------------------------------
-       |                  |                 |               |
- Dataset Zero        Public data        Simulation      Neuro 3D
- local/private         adapters           engine        GPU viewport
-       |                                      |
-       |                              Browser DSP worker
-       |                                      |
-       -------------------- control -------------------------
-                                 |
-                          Local Signal Gateway
-                              FastAPI
-                                 |
-                   ---------------------------
-                   |            |            |
-                  LSL       BrainFlow      Markers
-                   |            |            |
-                 EEG / physiological / future sensors
+                    MORPHEUS WORKSTATION
+
+  hardware / LSL / BrainFlow / native source
+                       |
+                       v
+              LOCAL ACQUISITION PLANE
+       +-----------------------------------+
+       | Rust morpheus-core               |
+       | bounded timestamped ring         |
+       | MRPH v1 binary frame batches     |
+       | FFT / band power / notch / RMS   |
+       +-----------------------------------+
+                       |
+              local recording + SHA-256
+                       |
+            optional local UDP bridge
+                       |
+              FastAPI ecosystem adapter
+              LSL / BrainFlow / PyNWB
+                       |
+          +------------+-------------+
+          |                          |
+     WebRTC samples          binary WebSocket
+     unordered/no retry          fallback
+          |                          |
+          +------------+-------------+
+                       |
+                browser Worker
+                       |
+             display SharedArrayBuffer
+              /                 \
+   Offscreen signal scope   low-rate UI state
 ```
 
-Vercel hosts the orchestration, visualization and public-data application. Real hardware acquisition and authoritative raw recording belong on the local workstation or lab compute node.
+The local/native acquisition plane is authoritative. The browser buffer is a bounded, disposable display copy.
 
-## Research programs
+The hosted Vercel application remains useful for orchestration, public data, simulations, visualization and research workflow development. It is not treated as an authoritative acquisition clock or raw-session storage service.
 
-- **M0 — Dataset Zero:** immutable prospective dream ground truth
-- **M1 — Recurrence & Continuity:** objective similarity and sequence structure
-- **M2 — Dream Reinstatement:** controlled interruption and continuation experiments
-- **M3 — Neural Decoding Baselines:** reproduce public-data baselines before subject-specific claims
-- **M4 — Live Neurophysiology:** synchronized non-invasive acquisition and event markers
-- **M5 — Individual Neural Atlas:** subject-specific representational alignment across perception, imagery, memory and sleep
+## Native engine
 
-Engineering readiness is not scientific validation. Morpheus deliberately keeps those states separate.
+### `native/morpheus-core`
 
-## Local gateway
+The Rust core provides:
+
+- timestamped bounded multi-channel ring buffers
+- MRPH v1 binary packet encoding/decoding
+- deterministic stream IDs and packet sequence accounting
+- RMS
+- min/max envelope reduction
+- radix-2 FFT power spectrum
+- frequency-band integration
+- biquad notch filtering
+- unit tests
+
+### `native/morpheus-gateway`
+
+The executable native gateway exercises:
+
+- native ring buffers
+- configurable channel/sample rates
+- bounded binary batching
+- UDP relay into the local adapter
+- direct local MRPH recording
+- SHA-256 finalized-session manifests
+
+Its built-in source is an engineering generator for exercising the native path. Vendor-specific direct hardware drivers are separate acquisition adapters and are not claimed complete.
+
+Example:
+
+```bash
+export MORPHEUS_SAMPLE_RATE=1024
+export MORPHEUS_CHANNELS=64
+export MORPHEUS_BATCH_FRAMES=16
+export MORPHEUS_UDP_TARGET=127.0.0.1:8790
+export MORPHEUS_RECORD_DIR="$HOME/morpheus-native-sessions"
+
+cargo run --release --manifest-path native/morpheus-gateway/Cargo.toml
+```
+
+## Local ecosystem gateway
+
+The Python gateway remains an adapter for neuroscience tooling:
+
+- Lab Streaming Layer discovery/chunk ingestion
+- BrainFlow board metadata/adapters
+- marker LSL outlet
+- WebRTC and binary WebSocket relay
+- optional native-MRPH UDP relay
+- local engineering recorder
+- offline PyNWB conversion
+
+Example:
 
 ```bash
 cd services/signal-gateway
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-local.txt
 
 export MORPHEUS_LOCAL_RECORDING_DIR="$HOME/morpheus-sessions"
-uvicorn app.main:app --reload --port 8787
+export MORPHEUS_NATIVE_UDP_BIND=127.0.0.1:8790
+uvicorn app.main:app --host 127.0.0.1 --port 8787
 ```
 
-Windows PowerShell:
+Then point the browser acquisition endpoint to `http://127.0.0.1:8787`.
 
-```powershell
-cd services/signal-gateway
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+## MRPH v1
 
-$env:MORPHEUS_LOCAL_RECORDING_DIR="$HOME\morpheus-sessions"
-uvicorn app.main:app --reload --port 8787
-```
+MRPH v1 transports batches rather than one JSON object per neural sample.
 
-Point the workstation acquisition endpoint to the local gateway.
+A packet contains:
+
+- protocol magic/version
+- flags
+- sequence number
+- stream ID
+- nominal sample rate
+- channel count
+- frame count
+- f64 timestamp + interleaved f32 channels for every frame
+
+Morpheus therefore reports **frames/second** and **packets/second** separately. Sequence gaps are counted explicitly.
+
+## M0–M5 execution programs
+
+### M0 — Dataset Zero
+- prospective local dream capture
+- IndexedDB persistence
+- SHA-256 sealing
+- separated annotations and raw report
+- exportable local corpus
+
+### M1 — Recurrence & Continuity
+- deterministic pairwise similarity
+- lexical/tag/modality components
+- non-match null comparison
+- screening p-value and candidate ranking
+
+### M2 — Dream Reinstatement
+- fixed interruption delay conditions
+- intention/control condition
+- local trial registry
+- synchronized marker integration
+- blinded scoring state
+- delay-response summary
+
+### M3 — Neural Decoding Baselines
+- local feature snapshots
+- leave-one-session-out baseline
+- nearest-centroid classifier
+- balanced accuracy/confusion matrix
+- permutation null
+
+### M4 — Live Neurophysiology
+- native Rust signal/protocol core
+- binary batched browser ingest
+- LSL / BrainFlow adapter plane
+- bounded display memory
+- local recording
+- sequence/drop/timing provenance
+- NWB conversion tooling
+
+### M5 — Individual Neural Atlas
+- subject/session registry
+- labeled state snapshots
+- local persistence
+- state centroids
+- cross-state similarity
+- M3 evaluation handoff
+
+These software pathways are executable. They do not establish that high-fidelity dream reconstruction, recovery of inaccessible historic dreams, or the underlying persistence hypothesis has been scientifically demonstrated.
+
+## Public neuroscience data
+
+Live anonymous adapters:
+
+- DANDI
+- OpenNeuro
+- NeuroVault
+- Allen Brain Map
+- Zenodo
+
+The source matrix additionally represents credentialed, registration-gated or controlled sources without presenting them as anonymous APIs.
+
+The 3D public-data graph persists discovered metadata records in IndexedDB and relates repositories, datasets and modalities. It does not fabricate nodes when upstream APIs return no data.
+
+## Neuro Spatial
+
+The neuro-spatial workspace includes:
+
+- public NeuroVault NIfTI study presets
+- local NIfTI-1/NIfTI-2 import
+- WebGL2 3D texture ray casting
+- axial/coronal/sagittal multiplanar views
+- transfer-function controls
+- active-volume-derived voxel fields
+- active-volume-derived region topology
+- UHD display mode
+
+A derived region-topology view is a visualization of the loaded volume and must not be interpreted as measured anatomical connectivity.
 
 ## Data policy
 
 Do not commit:
+
 - personal dream reports
 - participant identifiers
 - raw identifiable neural recordings
 - health records
 - credentials or API keys
 
-The public repository contains code, schemas, synthetic fixtures, experiment definitions and public-data integrations. Sensitive research ground truth remains local/private.
-
-## Scientific rule
-
-Morpheus can begin with radical hypotheses, but every claim must earn its evidence. Experiments should be designed so the motivating hypothesis can fail.
+Sensitive ground truth and authoritative recordings remain local/private.
 
 ## Safety
 
-Initial work is observational, computational and non-invasive. Invasive procedures, stimulation, pharmaceuticals, or clinical experimentation require qualified medical/institutional oversight.
+Initial Morpheus research is observational, computational and non-invasive. Invasive procedures, stimulation, pharmaceuticals and clinical experimentation require appropriate qualified and institutional oversight.
 
 ## License
 
-Apache-2.0 for code. Dataset licenses and data-use restrictions remain source-specific.
-
-
-## v0.4 workstation architecture
-
-Morpheus v0.4 moves the live display path away from React state:
-
-```text
-LSL / BrainFlow
-      |
- local gateway
-      |
-      +---- WebRTC DataChannel (preferred local path)
-      |          |
-      |          v
-      |   SharedArrayBuffer ring
-      |          |
-      |          v
-      |      WebGL2 scope
-      |
-      +---- Worker-owned WebSocket fallback
-                 |
-                 v
-          SharedArrayBuffer ring
-```
-
-The browser UI reads bounded signal windows from shared memory. React receives low-rate snapshots for diagnostics/model-worker summaries rather than every biosignal packet.
-
-The default screen is now a multi-pane operational workspace so acquisition, marker control, spatial visualization, and critical system state remain simultaneously visible. A persistent evidence boundary clearly differentiates live acquisition, simulation, and idle states.
-
-Dataset Zero now uses IndexedDB for the local text corpus and a press-and-hold sealing interlock. Continuous biosignal data remains outside browser storage.
-
-The local gateway can be containerized, can expose an optional WebRTC data channel when the local dependency profile is installed, and includes an offline JSONL-to-NWB conversion path.
+Apache-2.0 for code. Dataset licences and data-use restrictions remain source-specific.

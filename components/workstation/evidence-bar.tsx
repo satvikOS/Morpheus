@@ -21,6 +21,8 @@ export default function EvidenceBar({
   status,
   transport,
   packetRate,
+  frameRate,
+  byteRate,
   dropped,
   sharedMemory,
   gateway,
@@ -30,6 +32,8 @@ export default function EvidenceBar({
   status: GatewayStatus;
   transport: string;
   packetRate: number;
+  frameRate: number;
+  byteRate: number;
   dropped: number;
   sharedMemory: boolean;
   gateway: string;
@@ -163,7 +167,13 @@ export default function EvidenceBar({
           />
           <EvidenceStat
             icon={Database}
-            label="Rate"
+            label="Frames"
+            value={frameRate ? `${frameRate}/s` : "—"}
+            state={frameRate ? "ok" : "muted"}
+          />
+          <EvidenceStat
+            icon={Radio}
+            label="Packets"
             value={packetRate ? `${packetRate}/s` : "—"}
             state={packetRate ? "ok" : "muted"}
           />
@@ -192,6 +202,12 @@ export default function EvidenceBar({
             label="Recorder"
             value={recording ? "ACTIVE" : "LOCAL"}
             state={recording ? "warn" : "muted"}
+          />
+          <EvidenceStat
+            icon={Database}
+            label="Ingress"
+            value={byteRate ? formatRate(byteRate) : "—"}
+            state={byteRate ? "ok" : "muted"}
           />
           <EvidenceStat
             icon={ShieldCheck}
@@ -223,4 +239,15 @@ function EvidenceStat({
       <strong>{value}</strong>
     </div>
   );
+}
+
+
+function formatRate(bytes: number) {
+  if (bytes >= 1024 * 1024) {
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB/s";
+  }
+  if (bytes >= 1024) {
+    return (bytes / 1024).toFixed(1) + " kB/s";
+  }
+  return bytes + " B/s";
 }

@@ -44,7 +44,10 @@ export type SignalEngineState = {
   ring: SharedSignalRing | null;
   snapshots: number[][];
   packetRate: number;
+  frameRate: number;
+  byteRate: number;
   sourceName: string;
+  nominalSampleRate: number | null;
   sourceMode: "live" | "simulation" | "idle";
   dropped: number;
   transport: string;
@@ -83,7 +86,10 @@ export function useSignalEngine(
   connectionEpoch: number,
 ): SignalEngineState {
   const [packetRate, setPacketRate] = useState(0);
+  const [frameRate, setFrameRate] = useState(0);
+  const [byteRate, setByteRate] = useState(0);
   const [sourceName, setSourceName] = useState("");
+  const [nominalSampleRate, setNominalSampleRate] = useState<number | null>(null);
   const [sourceMode, setSourceMode] =
     useState<"live" | "simulation" | "idle">("idle");
   const [dropped, setDropped] = useState(0);
@@ -282,6 +288,8 @@ export function useSignalEngine(
 
       if (message.type === "metrics") {
         setPacketRate(Number(message.packetRate || 0));
+        setFrameRate(Number(message.frameRate || 0));
+        setByteRate(Number(message.byteRate || 0));
         setDropped(Number(message.dropped || 0));
         if (message.sourceName) setSourceName(String(message.sourceName));
         if (message.simulated) {
@@ -289,6 +297,13 @@ export function useSignalEngine(
         } else if (message.state === 2) {
           setSourceMode("live");
         }
+        return;
+      }
+
+      if (message.type === "stream-metadata") {
+        if (message.sourceName) setSourceName(String(message.sourceName));
+        const rate = Number(message.sampleRate);
+        if (Number.isFinite(rate) && rate > 0) setNominalSampleRate(rate);
         return;
       }
 
@@ -486,6 +501,12 @@ export function useSignalEngine(
         setPacketRate(
           Atomics.load(ring.control, CONTROL.PACKET_RATE),
         );
+        setFrameRate(
+          Atomics.load(ring.control, 8),
+        );
+        setByteRate(
+          Atomics.load(ring.control, 9),
+        );
         setDropped(
           Atomics.load(ring.control, CONTROL.DROPPED),
         );
@@ -593,7 +614,10 @@ export function useSignalEngine(
     ring,
     snapshots,
     packetRate,
+    frameRate,
+    byteRate,
     sourceName,
+    nominalSampleRate,
     sourceMode,
     dropped,
     transport,

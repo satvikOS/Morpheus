@@ -1,58 +1,71 @@
-# M0–M5 Research Programs
+# M0–M5 Research Programs — v0.7
+
+Morpheus distinguishes **software execution completeness** from **scientific validation**.
 
 ## M0 — Dataset Zero
-Prospective immutable dream capture, SHA-256 provenance, annotations, confidence, sensory modalities, recurrence links.
-
-Implemented workstation surfaces:
-- local dream capture
-- local storage
+Software path:
+- prospective local capture
+- IndexedDB persistence
+- SHA-256 raw-report seal
+- separated tags, modalities, confidence and lucidity
 - JSON export
-- M1 recurrence-candidate baseline
+
+Scientific gate: prospective records and negative/non-match records must be retained.
 
 ## M1 — Recurrence & Continuity
-Objective comparison of dream records using predeclared similarity measures and future spatial/narrative features.
+Software path:
+- lexical cosine similarity
+- tag and modality overlap
+- all-pairs ranking
+- deterministic non-match null comparisons
+- screening p-value and shared-token inspection
 
-Current implementation:
-- deterministic local lexical/tag/modality similarity
-- ranked recurrence candidates
-- no raw report upload
+Scientific gate: candidate rankings are not evidence of identity/continuity without preregistered criteria and independent evaluation.
 
 ## M2 — Dream Reinstatement
-Controlled awakening / return-to-sleep experiments.
+Software path:
+- fixed pre-awakening delay condition
+- explicit intention/control condition
+- local trial registry
+- gateway marker integration
+- blinded/unblinded scoring state
+- continuity score
+- delay-response summary
 
-Current implementation:
-- protocol surface
-- exact event marker console
-- gateway marker API
-- LSL marker outlet when running locally with pylsl
+Scientific gate: awakening and return-to-sleep timing, scoring criteria and analysis must be established before collecting confirmatory trials.
 
 ## M3 — Neural Decoding Baselines
-Reproduce public-data decoding baselines before dream-specific decoding.
+Software path:
+- local labeled feature snapshots
+- fixed feature width
+- leave-one-session-out nearest-centroid classification
+- balanced accuracy
+- confusion matrix
+- deterministic permutation null and p-value
 
-Current implementation:
-- DANDI / OpenNeuro / NeuroVault / Allen adapters
-- browser DSP worker
-- public-data discovery fabric
-- model-worker architecture boundary
+Scientific gate: this is a baseline harness, not a validated dream decoder.
 
 ## M4 — Live Neurophysiology
-Synchronized non-invasive acquisition.
+Software path:
+- Rust timestamped ring buffer
+- MRPH v1 binary frame batches
+- sequence/drop accounting
+- LSL discovery and chunk ingestion
+- BrainFlow adapter metadata
+- WebRTC sample relay with binary WebSocket fallback
+- direct local recording paths
+- SHA-256 session manifests
+- NWB conversion tooling
 
-Current implementation:
-- LSL discovery
-- live WebSocket sample relay
-- bounded multi-channel ring buffers
-- up to 16 displayed channels
-- event markers
-- BrainFlow dependency in the local gateway environment
+Scientific gate: real hardware must be characterized for channel calibration, clock behavior, packet loss, and artifact performance.
 
 ## M5 — Individual Neural Atlas
-Subject-specific representation alignment across perception, imagery, memory and sleep.
+Software path:
+- subject and session identifiers
+- labeled awake/imagery/sleep/dream feature snapshots
+- IndexedDB persistence
+- state centroids
+- cross-state cosine similarities
+- M3 baseline handoff
 
-Current implementation:
-- dedicated 3D atlas / connectome / volumetric workspace
-- NIfTI import
-- GPU ray-cast volume rendering
-- staged neural-inference and GPU-worker boundaries
-
-M5 is an engineering scaffold, not evidence that high-fidelity dream reconstruction has been achieved.
+Scientific gate: subject-specific representation stability requires real repeated-session data and held-out validation. Morpheus does not claim that a usable high-dimensional dream atlas has already been established.

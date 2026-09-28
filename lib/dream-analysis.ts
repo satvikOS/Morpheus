@@ -54,6 +54,9 @@ export type DreamSimilarity = {
   tags: number;
   modalities: number;
   sharedTokens: string[];
+  nullMean?: number;
+  permutationP?: number;
+  nullComparisons?: number;
 };
 
 export function compareDreams(a: DreamRecord, b: DreamRecord): DreamSimilarity {
@@ -83,14 +86,97 @@ export function compareDreams(a: DreamRecord, b: DreamRecord): DreamSimilarity {
   };
 }
 
-export function recurrenceCandidates(records: DreamRecord[], limit = 12) {
+function seededRandom(seedText: string) {
+  let seed = 2166136261;
+  for (let index = 0; index < seedText.length; index += 1) {
+    seed ^= seedText.charCodeAt(index);
+    seed = Math.imul(seed, 16777619);
+  }
+
+  return () => {
+    seed += 0x6d2b79f5;
+    let value = seed;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function nullDistribution(
+  anchor: DreamRecord,
+  excludedId: string,
+  records: DreamRecord[],
+  iterations = 96,
+) {
+  const pool = records.filter(
+    (record) =>
+      record.dream_id !== anchor.dream_id &&
+      record.dream_id !== excludedId,
+  );
+
+  if (!pool.length) return [] as number[];
+
+  const random = seededRandom(
+    anchor.dream_id + ":" + excludedId,
+  );
+  const scores: number[] = [];
+
+  for (let index = 0; index < iterations; index += 1) {
+    const candidate =
+      pool[Math.floor(random() * pool.length) % pool.length];
+    scores.push(compareDreams(anchor, candidate).score);
+  }
+
+  return scores;
+}
+
+export function recurrenceCandidates(
+  records: DreamRecord[],
+  limit = 12,
+) {
   const pairs: DreamSimilarity[] = [];
+
   for (let i = 0; i < records.length; i += 1) {
     for (let j = i + 1; j < records.length; j += 1) {
-      pairs.push(compareDreams(records[i], records[j]));
+      const observed = compareDreams(records[i], records[j]);
+      const nullScores = [
+        ...nullDistribution(
+          records[i],
+          records[j].dream_id,
+          records,
+        ),
+        ...nullDistribution(
+          records[j],
+          records[i].dream_id,
+          records,
+        ),
+      ];
+
+      if (nullScores.length) {
+        observed.nullMean =
+          nullScores.reduce(
+            (sum, value) => sum + value,
+            0,
+          ) / nullScores.length;
+        observed.permutationP =
+          (1 +
+            nullScores.filter(
+              (value) => value >= observed.score,
+            ).length) /
+          (nullScores.length + 1);
+        observed.nullComparisons = nullScores.length;
+      }
+
+      pairs.push(observed);
     }
   }
+
   return pairs
-    .sort((left, right) => right.score - left.score)
+    .sort((left, right) => {
+      const leftP = left.permutationP ?? 1;
+      const rightP = right.permutationP ?? 1;
+      if (leftP !== rightP) return leftP - rightP;
+      return right.score - left.score;
+    })
     .slice(0, limit);
 }

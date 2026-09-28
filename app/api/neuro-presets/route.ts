@@ -50,6 +50,33 @@ const presets = {
     referenceUrl: "https://neurovault.org/images/441983/",
     note: "Combined cortical and subcortical parcellation.",
   },
+  "hippocampus-ho-50": {
+    id: "hippocampus-ho-50",
+    label: "Bilateral Hippocampus · Harvard–Oxford 50%",
+    source: "NeuroVault",
+    imageId: 448213,
+    kind: "region-mask",
+    referenceUrl: "https://neurovault.org/images/448213/",
+    note: "Bilateral hippocampus mask derived from Harvard–Oxford.",
+  },
+  "anterior-hippocampus-ho-50": {
+    id: "anterior-hippocampus-ho-50",
+    label: "Anterior Hippocampus · Harvard–Oxford 50%",
+    source: "NeuroVault",
+    imageId: 448214,
+    kind: "region-mask",
+    referenceUrl: "https://neurovault.org/images/448214/",
+    note: "Anterior bilateral hippocampus mask.",
+  },
+  "default-mode-network": {
+    id: "default-mode-network",
+    label: "Default Mode Network ROI",
+    source: "NeuroVault",
+    imageId: 109845,
+    kind: "network-mask",
+    referenceUrl: "https://neurovault.org/images/109845/",
+    note: "Public default-mode network ROI map.",
+  },
 } as const;
 
 type PresetId = keyof typeof presets;
@@ -58,16 +85,19 @@ function isPresetId(value: string): value is PresetId {
   return value in presets;
 }
 
-function trustedNeuroVaultFile(url: string) {
+function normalizeNeuroVaultFile(url: string) {
   try {
     const parsed = new URL(url);
-    return (
-      parsed.protocol === "https:" &&
-      (parsed.hostname === "neurovault.org" ||
-        parsed.hostname === "www.neurovault.org")
-    );
+    const trusted =
+      parsed.hostname === "neurovault.org" ||
+      parsed.hostname === "www.neurovault.org" ||
+      parsed.hostname.endsWith(".neurovault.org");
+
+    if (!trusted) return null;
+    parsed.protocol = "https:";
+    return parsed.toString();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -133,8 +163,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const file = image.file;
-    if (!file || !trustedNeuroVaultFile(file)) {
+    const file = image.file ? normalizeNeuroVaultFile(image.file) : null;
+    if (!file) {
       return Response.json(
         {
           ok: false,

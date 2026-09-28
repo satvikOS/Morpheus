@@ -1,7 +1,6 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import Image from "next/image";
 import { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -30,6 +29,7 @@ import ResearchProgramsPanel from "@/components/workstation/research-programs-pa
 import SimulationPanel from "@/components/workstation/simulation-panel";
 import SystemPanel from "@/components/workstation/system-panel";
 import WorkspacePanel from "@/components/workstation/workspace-panel";
+import MorpheusLogo from "@/components/morpheus-logo";
 import type { GatewayStatus, StreamInfo, WorkstationView } from "@/lib/morpheus";
 import { useSignalEngine } from "@/lib/use-signal-engine";
 
@@ -170,22 +170,13 @@ export default function Home() {
         <aside className="workstation-sidebar">
           <div className="px-3 pb-5 pt-3">
             <div className="flex items-center gap-3">
-              <div className="morpheus-logo-shell">
-                <Image
-                  src="/morpheus-logo.png"
-                  alt="Morpheus"
-                  width={38}
-                  height={38}
-                  priority
-                  className="h-full w-full object-cover"
-                />
-              </div>
+              <MorpheusLogo size={38} />
               <div>
                 <div className="text-sm font-semibold tracking-tight text-slate-100">
                   Morpheus
                 </div>
                 <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">
-                  Research OS · v0.6
+                  Research OS · v0.7
                 </div>
               </div>
             </div>
@@ -233,8 +224,8 @@ export default function Home() {
                   <span>channels</span>
                 </div>
                 <div>
-                  <strong>{signal.packetRate}</strong>
-                  <span>packets/s</span>
+                  <strong>{signal.frameRate}</strong>
+                  <span>frames/s</span>
                 </div>
                 <div>
                   <strong>{signal.dropped}</strong>
@@ -276,8 +267,8 @@ export default function Home() {
                 <strong>{latency === null ? "—" : `${latency} ms`}</strong>
               </div>
               <div>
-                <span>Rate</span>
-                <strong>{signal.packetRate || "—"}</strong>
+                <span>Frames</span>
+                <strong>{signal.frameRate || "—"}</strong>
               </div>
               <button
                 onClick={() => setView("system")}
@@ -294,6 +285,8 @@ export default function Home() {
             status={status}
             transport={signal.transport}
             packetRate={signal.packetRate}
+            frameRate={signal.frameRate}
+            byteRate={signal.byteRate}
             dropped={signal.dropped}
             sharedMemory={signal.sharedMemory}
             gateway={gateway}
@@ -312,7 +305,7 @@ export default function Home() {
               <WorkspacePanel
                 ring={signal.ring}
                 snapshots={channelSamples}
-                packetRate={signal.packetRate}
+                packetRate={signal.frameRate}
                 sourceMode={signal.sourceMode}
                 sourceName={signal.sourceName}
                 status={status}
@@ -331,7 +324,7 @@ export default function Home() {
                 status={status}
                 streams={streams}
                 latency={latency}
-                sampleRate={signal.packetRate}
+                sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
                 sourceMode={signal.sourceMode}
                 onNavigate={setView}
               />
@@ -348,7 +341,7 @@ export default function Home() {
                 channelSamples={channelSamples}
                 ring={signal.ring}
                 latency={latency}
-                sampleRate={signal.packetRate}
+                sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
                 sourceMode={signal.sourceMode}
                 sourceName={signal.sourceName}
                 gateway={gateway}
@@ -374,7 +367,15 @@ export default function Home() {
                 clockSync={signal.clockSync}
               />
             </div>
-            {view === "programs" ? <ResearchProgramsPanel /> : null}
+            {view === "programs" ? (
+              <ResearchProgramsPanel
+                onNavigate={setView}
+                channelSamples={channelSamples}
+                sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
+                sourceName={signal.sourceName}
+                sourceMode={signal.sourceMode}
+              />
+            ) : null}
             {view === "models" ? (
               <ModelWorkersPanel
                 samples={samples}
