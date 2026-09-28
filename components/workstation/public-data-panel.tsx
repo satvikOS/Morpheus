@@ -71,11 +71,11 @@ export default function PublicDataPanel() {
         <SectionHeader
           eyebrow="Open neuroscience data fabric"
           title="Live public repositories"
-          description="Morpheus queries multiple public neuroscience archives through server-side adapters so the research workstation can discover electrophysiology, neuroimaging, brain maps, anatomy, and atlas data from one surface."
+          description="Morpheus queries multiple public research archives through isolated server-side adapters so the workstation can discover electrophysiology, neuroimaging, statistical maps, anatomy, atlases, and open research records from one surface."
           action={
             <div className="flex items-center gap-2 text-[10px] uppercase tracking-[.16em] text-slate-600">
               <StatusDot online={onlineCount > 0} />
-              {onlineCount}/{sources.length || 4} sources online
+              {onlineCount}/{sources.length || 5} sources online
             </div>
           }
         />
