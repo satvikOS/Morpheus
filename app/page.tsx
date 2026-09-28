@@ -185,7 +185,7 @@ export default function Home() {
                   Morpheus
                 </div>
                 <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">
-                  Research OS · v0.5
+                  Research OS · v0.6
                 </div>
               </div>
             </div>
