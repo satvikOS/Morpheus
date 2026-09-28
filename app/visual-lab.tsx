@@ -23,11 +23,26 @@ import {
   Waypoints,
 } from "lucide-react";
 import * as THREE from "three";
-import * as nifti from "nifti-reader-js";
+import * as niftiModule from "nifti-reader-js";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { generateVolumePhantom } from "@/lib/simulations";
 
 type Mode = "volume" | "atlas" | "network" | "scene";
+
+type NiftiHeader = {
+  dims: number[];
+  datatypeCode: number;
+};
+
+type NiftiReaderApi = {
+  isCompressed: (data: ArrayBuffer) => boolean;
+  decompress: (data: ArrayBuffer) => ArrayBuffer;
+  isNIFTI: (data: ArrayBuffer) => boolean;
+  readHeader: (data: ArrayBuffer) => NiftiHeader;
+  readImage: (header: NiftiHeader, data: ArrayBuffer) => ArrayBuffer;
+};
+
+const niftiReader = niftiModule as unknown as NiftiReaderApi;
 
 type VolumeData = {
   name: string;
@@ -430,19 +445,16 @@ export default function VisualLab() {
     try {
       let buffer = await file.arrayBuffer();
 
-      if (nifti.isCompressed(buffer)) {
-        buffer = nifti.decompress(buffer);
+      if (niftiReader.isCompressed(buffer)) {
+        buffer = niftiReader.decompress(buffer);
       }
 
-      if (!nifti.isNIFTI(buffer)) {
+      if (!niftiReader.isNIFTI(buffer)) {
         throw new Error("File is not a valid NIfTI-1/NIfTI-2 volume.");
       }
 
-      const header = nifti.readHeader(buffer) as unknown as {
-        dims: number[];
-        datatypeCode: number;
-      };
-      const image = nifti.readImage(header as never, buffer);
+      const header = niftiReader.readHeader(buffer);
+      const image = niftiReader.readImage(header, buffer);
       const dims: [number, number, number] = [
         Number(header.dims[1]),
         Number(header.dims[2]),
