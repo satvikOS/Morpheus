@@ -25,7 +25,12 @@ except Exception:
     StreamOutlet = None
     resolve_streams = None
 
-app = FastAPI(title="Morpheus Signal Gateway", version="0.2.0")
+try:
+    from brainflow.board_shim import BoardShim
+except Exception:
+    BoardShim = None
+
+app = FastAPI(title="Morpheus Signal Gateway", version="0.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,11 +128,38 @@ def metrics() -> dict[str, Any]:
 def capabilities() -> dict[str, Any]:
     return {
         "lsl": resolve_streams is not None,
+        "brainflow": BoardShim is not None,
         "websocket_samples": True,
         "markers": True,
         "synthetic_fallback": True,
         "recording": False,
+        "raw_recording_policy": "local-only",
     }
+
+
+@app.get("/brainflow/boards/{board_id}")
+@app.get("/api/signal-gateway/brainflow/boards/{board_id}")
+def brainflow_board(board_id: int) -> dict[str, Any]:
+    if BoardShim is None:
+        return {
+            "available": False,
+            "board_id": board_id,
+            "reason": "BrainFlow is not installed in this runtime. Use the local Morpheus gateway.",
+        }
+
+    try:
+        descriptor = BoardShim.get_board_descr(board_id)
+        return {
+            "available": True,
+            "board_id": board_id,
+            "descriptor": descriptor,
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "board_id": board_id,
+            "reason": str(exc),
+        }
 
 
 @app.post("/markers")
@@ -174,6 +206,10 @@ async def synthetic_stream(ws: WebSocket) -> None:
                 0.18 * math.sin(phase * 8.1 + 0.7),
                 0.11 * math.sin(phase * 3.3 + 1.2),
                 0.08 * math.sin(phase * 18.0 + 0.3),
+                0.16 * math.sin(phase * 5.1 + 1.8) + 0.04 * math.sin(phase * 21.0),
+                0.13 * math.sin(phase * 7.4 + 2.2),
+                0.09 * math.sin(phase * 11.6 + 0.9),
+                0.07 * math.sin(phase * 3.8 + 2.9),
             ]
             await ws.send_text(
                 json.dumps(
@@ -242,6 +278,6 @@ async def websocket_samples(ws: WebSocket) -> None:
 def root() -> dict[str, str]:
     return {
         "service": "Morpheus Signal Gateway",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "purpose": "Low-latency LSL acquisition, synchronization, and workstation relay",
     }
