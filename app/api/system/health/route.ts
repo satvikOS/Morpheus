@@ -47,7 +47,7 @@ export async function GET(request: NextRequest) {
 
   return Response.json({
     service: "morpheus-workstation",
-    version: "0.5.0",
+    version: "0.6.0",
     ok: probes.every((item) => item.ok),
     probes,
     capabilities: {
@@ -62,6 +62,10 @@ export async function GET(request: NextRequest) {
       reliable_webrtc_control_channel: true,
       persistent_operational_views: true,
       sealed_session_manifest_sha256: true,
+      public_neuroanatomy_presets: true,
+      live_public_knowledge_graph_3d: true,
+      source_access_classification: true,
+      hosted_clock_guard: true,
       browser_dsp_worker: true,
       synthetic_brain_simulations: true,
       nifti_volume_import: true,

@@ -81,6 +81,12 @@ export type PublicDataSource = {
   latency_ms: number;
   datasets: PublicDataset[];
   error?: string | null;
+  institution?: string;
+  platform?: string;
+  access_mode?: "anonymous-api" | "authenticated-api" | "registration" | "controlled" | "download-license" | "portal";
+  capability?: string;
+  status_note?: string;
+  homepage?: string;
 };
 
 export type ModelWorkerState = {

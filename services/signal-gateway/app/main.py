@@ -6,6 +6,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,9 @@ _marker_outlet: Any = None
 WEBRTC_PEERS: set[Any] = set()
 WEBRTC_TASKS: set[asyncio.Task[Any]] = set()
 MARKER_SEQUENCE = 0
+GATEWAY_INSTANCE_ID = str(uuid.uuid4())
+HOSTED_RUNTIME = os.environ.get("VERCEL") == "1"
+CLOCK_STABLE_FOR_MARKERS = not HOSTED_RUNTIME
 
 
 class LocalRecorder:
@@ -326,6 +330,9 @@ def clock() -> dict[str, Any]:
         "clock_domain": clock_domain,
         "wall_time": time.time(),
         "monotonic_ns": time.perf_counter_ns(),
+        "instance_id": GATEWAY_INSTANCE_ID,
+        "stable_for_markers": CLOCK_STABLE_FOR_MARKERS,
+        "runtime": "hosted" if HOSTED_RUNTIME else "local",
     }
 
 
@@ -355,6 +362,9 @@ def capabilities() -> dict[str, Any]:
         "recording": RECORDER.enabled,
         "recording_active": RECORDER.active,
         "raw_recording_policy": "local-only",
+        "gateway_instance_id": GATEWAY_INSTANCE_ID,
+        "clock_stable_for_markers": CLOCK_STABLE_FOR_MARKERS,
+        "runtime": "hosted" if HOSTED_RUNTIME else "local",
     }
 
 

@@ -219,7 +219,7 @@ export default function SignalCanvas({
           <span className="truncate text-[10px] uppercase tracking-[.15em] text-slate-500">
             {sourceName || "Signal monitor"}
           </span>
-          <span className="renderer-badge">{renderer}</span>
+
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -286,13 +286,6 @@ export default function SignalCanvas({
           )}
         </div>
 
-        <div className="pointer-events-none absolute bottom-2 right-3 flex gap-2 text-[9px] uppercase tracking-[.12em] text-slate-650">
-          <span>OffscreenCanvas</span>
-          <span>WebGL2</span>
-          <span>Min/Max envelope</span>
-          <span>{ring ? "Shared memory" : "Snapshot fallback"}</span>
-        </div>
-
         {sourceMode === "simulation" ? (
           <div className="simulation-watermark">
             SIMULATION · NOT EXPERIMENTAL DATA
@@ -347,6 +340,11 @@ export default function SignalCanvas({
               <span>Hotkeys</span>
               <strong>[ ] window · - + gain · P polarity · M montage</strong>
             </div>
+            <div>
+              <Activity size={12} />
+              <span>Renderer</span>
+              <strong>{renderer}</strong>
+            </div>
           </div>
 
           {calibratedUv && pxPerMm ? (
@@ -367,13 +365,14 @@ export default function SignalCanvas({
         </div>
       ) : null}
 
-      <div className="signal-calibration-note">
-        <SlidersHorizontal size={12} />
-        The renderer runs in a dedicated OffscreenCanvas worker with antialiasing
-        disabled. When samples exceed horizontal pixel density it renders a
-        per-pixel min/max envelope so narrow transients are not erased by naive
-        point skipping.
-      </div>
+      {!compact ? (
+        <div className="signal-calibration-note">
+          <SlidersHorizontal size={12} />
+          Rendering and display calibration details are separated from the live
+          trace area. Signal paths use OffscreenCanvas WebGL2 with antialiasing
+          disabled and min/max envelope reduction under dense compression.
+        </div>
+      ) : null}
     </div>
   );
 }

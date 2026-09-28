@@ -137,7 +137,10 @@ export function useSignalEngine(
         offsetSeconds: number;
         rttMs: number;
         clockDomain: string;
+        instanceId: string;
       }> = [];
+      let stableForMarkers = true;
+      let rejectedRuntime = "";
 
       for (let index = 0; index < samplesPerRound; index += 1) {
         if (cancelled) return;
@@ -153,11 +156,16 @@ export function useSignalEngine(
           if (response.ok) {
             const payload = await response.json();
             const remote = Number(payload.clock_time);
-            if (Number.isFinite(remote)) {
+            stableForMarkers = payload.stable_for_markers !== false;
+            rejectedRuntime = String(payload.runtime || "");
+            const instanceId = String(payload.instance_id || "unknown");
+
+            if (stableForMarkers && Number.isFinite(remote)) {
               candidates.push({
                 offsetSeconds: remote - (t0 + t1) / 2,
                 rttMs: (t1 - t0) * 1000,
                 clockDomain: String(payload.clock_domain || "gateway_clock"),
+                instanceId,
               });
             }
           }
@@ -168,18 +176,50 @@ export function useSignalEngine(
         }
       }
 
-      if (!candidates.length || cancelled) {
-        setClockSync((current) => ({
-          ...current,
+      if (!stableForMarkers || !candidates.length || cancelled) {
+        setClockSync({
           ready: false,
+          offsetSeconds: 0,
           rttMs: null,
           uncertaintyMs: null,
-        }));
+          clockDomain:
+            rejectedRuntime === "hosted"
+              ? "hosted_gateway_not_authoritative"
+              : "unsynchronized",
+          sampledAt: Date.now(),
+        });
         return;
       }
 
-      candidates.sort((a, b) => a.rttMs - b.rttMs);
-      const best = candidates.slice(0, Math.min(3, candidates.length));
+      const grouped = new Map<string, typeof candidates>();
+      for (const candidate of candidates) {
+        const list = grouped.get(candidate.instanceId) || [];
+        list.push(candidate);
+        grouped.set(candidate.instanceId, list);
+      }
+
+      const coherent = Array.from(grouped.values()).sort(
+        (a, b) => b.length - a.length,
+      )[0] || [];
+
+      if (coherent.length < Math.min(3, samplesPerRound)) {
+        setClockSync({
+          ready: false,
+          offsetSeconds: 0,
+          rttMs: null,
+          uncertaintyMs: null,
+          clockDomain: "gateway_instance_unstable",
+          sampledAt: Date.now(),
+        });
+        return;
+      }
+
+      coherent.sort((a, b) => a.rttMs - b.rttMs);
+      const candidatesForEstimate = coherent;
+      const best = candidatesForEstimate.slice(
+        0,
+        Math.min(3, candidatesForEstimate.length),
+      );
       const offsets = best
         .map((candidate) => candidate.offsetSeconds)
         .sort((a, b) => a - b);

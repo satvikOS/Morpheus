@@ -12,11 +12,13 @@ import {
   Points,
 } from "@react-three/drei";
 import {
-  Box,
+  Brain,
   Braces,
   Cpu,
+  ExternalLink,
   Grid3X3,
   Layers3,
+  Loader2,
   MonitorUp,
   RotateCcw,
   Upload,
@@ -24,10 +26,17 @@ import {
 } from "lucide-react";
 import * as THREE from "three";
 import * as niftiModule from "nifti-reader-js";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { generateVolumePhantom } from "@/lib/simulations";
 
-type Mode = "volume" | "atlas" | "network" | "scene";
+type Mode = "volume" | "atlas" | "network";
 
 type NiftiHeader = {
   dims: number[];
@@ -42,38 +51,52 @@ type NiftiReaderApi = {
   readImage: (header: NiftiHeader, data: ArrayBuffer) => ArrayBuffer;
 };
 
-const niftiReader = niftiModule as unknown as NiftiReaderApi;
+type BrainPreset = {
+  id: string;
+  label: string;
+  source: string;
+  kind: string;
+  referenceUrl: string;
+  note: string;
+};
 
 type VolumeData = {
   name: string;
   dims: [number, number, number];
   voxels: Uint8Array;
-  source: "synthetic" | "nifti";
+  source: "synthetic" | "nifti" | "public";
+  referenceUrl?: string;
 };
 
-function defaultPoints(count = 2800) {
+const niftiReader = niftiModule as unknown as NiftiReaderApi;
+
+function defaultPoints(count = 4800) {
   const values = new Float32Array(count * 3);
   for (let i = 0; i < count; i += 1) {
     const phi = Math.acos(1 - (2 * (i + 0.5)) / count);
     const theta = Math.PI * (1 + Math.sqrt(5)) * i;
     const radialNoise =
-      1 + 0.08 * Math.sin(i * 0.73) + 0.045 * Math.cos(i * 1.91);
+      1 +
+      0.07 * Math.sin(i * 0.73) +
+      0.035 * Math.cos(i * 1.91) +
+      0.018 * Math.sin(i * 3.17);
+
     values[i * 3] =
       Math.cos(theta) * Math.sin(phi) * 2.75 * radialNoise;
-    values[i * 3 + 1] = Math.cos(phi) * 2.1 * radialNoise;
+    values[i * 3 + 1] = Math.cos(phi) * 2.05 * radialNoise;
     values[i * 3 + 2] =
-      Math.sin(theta) * Math.sin(phi) * 2.35 * radialNoise;
+      Math.sin(theta) * Math.sin(phi) * 2.33 * radialNoise;
   }
   return values;
 }
 
 function networkNodes() {
-  return Array.from({ length: 72 }, (_, i) => {
+  return Array.from({ length: 128 }, (_, i) => {
     const angle = i * 2.3999632297;
-    const r = 1.1 + (i % 11) * 0.19;
+    const r = 1.05 + (i % 17) * 0.11;
     return [
       Math.cos(angle) * r,
-      ((i % 13) - 6) * 0.23,
+      ((i % 19) - 9) * 0.15,
       Math.sin(angle) * r,
     ] as [number, number, number];
   });
@@ -86,19 +109,19 @@ function Atlas({ positions }: { positions: Float32Array }) {
         <PointMaterial
           transparent
           color="#8ed7ff"
-          size={0.022}
+          size={0.018}
           sizeAttenuation
           depthWrite={false}
-          opacity={0.82}
+          opacity={0.76}
         />
       </Points>
-      <mesh scale={[2.82, 2.14, 2.42]}>
-        <icosahedronGeometry args={[1, 5]} />
+      <mesh scale={[2.82, 2.08, 2.4]}>
+        <icosahedronGeometry args={[1, 6]} />
         <meshBasicMaterial
-          color="#29445a"
+          color="#253847"
           wireframe
           transparent
-          opacity={0.12}
+          opacity={0.1}
         />
       </mesh>
     </>
@@ -107,65 +130,36 @@ function Atlas({ positions }: { positions: Float32Array }) {
 
 function Network() {
   const nodes = useMemo(() => networkNodes(), []);
+
   return (
     <>
       {nodes.map((node, index) => (
         <mesh key={index} position={node}>
-          <sphereGeometry args={[index % 7 === 0 ? 0.075 : 0.035, 12, 12]} />
+          <sphereGeometry args={[index % 11 === 0 ? 0.065 : 0.028, 10, 10]} />
           <meshStandardMaterial
-            color={index % 7 === 0 ? "#b8e4ff" : "#6488a2"}
-            emissive={index % 7 === 0 ? "#4aa8df" : "#203a4a"}
-            emissiveIntensity={index % 7 === 0 ? 1.4 : 0.45}
+            color={index % 11 === 0 ? "#b4d7e8" : "#607a8a"}
+            emissive={index % 11 === 0 ? "#3b728e" : "#172a34"}
+            emissiveIntensity={index % 11 === 0 ? 0.8 : 0.25}
           />
         </mesh>
       ))}
       {nodes.map((node, index) => {
         const targets = [
           nodes[(index * 7 + 5) % nodes.length],
-          nodes[(index * 11 + 17) % nodes.length],
+          nodes[(index * 13 + 23) % nodes.length],
         ];
+
         return targets.map((target, targetIndex) => (
           <Line
             key={`line-${index}-${targetIndex}`}
             points={[node, target]}
-            color="#47758f"
+            color="#476273"
             transparent
-            opacity={0.16}
-            lineWidth={0.55}
+            opacity={0.12}
+            lineWidth={0.45}
           />
         ));
       })}
-    </>
-  );
-}
-
-function ScenePrimitives() {
-  return (
-    <>
-      <mesh position={[-1.7, 0.55, -0.5]}>
-        <boxGeometry args={[1.6, 1.1, 1.2]} />
-        <meshStandardMaterial
-          color="#172532"
-          metalness={0.25}
-          roughness={0.72}
-        />
-      </mesh>
-      <mesh position={[1.2, 0.7, 0.4]}>
-        <sphereGeometry args={[0.82, 48, 48]} />
-        <meshStandardMaterial
-          color="#34536a"
-          metalness={0.2}
-          roughness={0.4}
-        />
-      </mesh>
-      <mesh position={[0, 0.35, -2]}>
-        <torusKnotGeometry args={[0.72, 0.16, 160, 18]} />
-        <meshStandardMaterial
-          color="#7dc8ef"
-          emissive="#17384c"
-          emissiveIntensity={0.7}
-        />
-      </mesh>
     </>
   );
 }
@@ -196,9 +190,9 @@ const volumeFragmentShader = `
   }
 
   vec3 transfer(float value) {
-    vec3 low = vec3(0.06, 0.18, 0.28);
-    vec3 mid = vec3(0.30, 0.62, 0.78);
-    vec3 high = vec3(0.88, 0.96, 1.0);
+    vec3 low = vec3(0.055, 0.105, 0.145);
+    vec3 mid = vec3(0.30, 0.52, 0.62);
+    vec3 high = vec3(0.88, 0.92, 0.94);
     return value < 0.62
       ? mix(low, mid, smoothstep(uThreshold, 0.62, value))
       : mix(mid, high, smoothstep(0.62, 1.0, value));
@@ -209,19 +203,23 @@ const volumeFragmentShader = `
     vec3 p = vObjectPosition + direction * 0.003;
     vec4 accum = vec4(0.0);
 
-    for (int i = 0; i < 220; i++) {
+    for (int i = 0; i < 260; i++) {
       if (!insideBox(p)) break;
 
       float value = texture(uVolume, p + vec3(0.5)).r;
-      float opacity = smoothstep(uThreshold, min(1.0, uThreshold + 0.26), value);
-      opacity *= 0.022 * uDensity;
+      float opacity = smoothstep(
+        uThreshold,
+        min(1.0, uThreshold + 0.24),
+        value
+      );
+      opacity *= 0.019 * uDensity;
 
       vec3 color = transfer(value) * uBrightness;
       accum.rgb += (1.0 - accum.a) * color * opacity;
       accum.a += (1.0 - accum.a) * opacity;
 
-      if (accum.a > 0.965) break;
-      p += direction * 0.0065;
+      if (accum.a > 0.97) break;
+      p += direction * 0.0058;
     }
 
     if (accum.a < 0.008) discard;
@@ -331,12 +329,12 @@ function Scene({
   return (
     <>
       <PerspectiveCamera makeDefault position={[6.7, 4.4, 7.4]} fov={43} />
-      <ambientLight intensity={0.42} />
-      <directionalLight position={[7, 9, 5]} intensity={1.2} />
+      <ambientLight intensity={0.52} />
+      <directionalLight position={[7, 9, 5]} intensity={1.0} />
       <pointLight
         position={[-5, 2, -3]}
-        intensity={0.8}
-        color="#4ca6d7"
+        intensity={0.55}
+        color="#6e99ad"
       />
 
       <Suspense fallback={null}>
@@ -350,18 +348,17 @@ function Scene({
         ) : null}
         {mode === "atlas" ? <Atlas positions={positions} /> : null}
         {mode === "network" ? <Network /> : null}
-        {mode === "scene" ? <ScenePrimitives /> : null}
 
         {showGrid ? (
           <Grid
             args={[50, 50]}
             position={[0, -2.9, 0]}
             cellSize={0.5}
-            cellThickness={0.45}
-            cellColor="#14222d"
+            cellThickness={0.35}
+            cellColor="#152029"
             sectionSize={5}
-            sectionThickness={0.9}
-            sectionColor="#29404f"
+            sectionThickness={0.7}
+            sectionColor="#2b3b46"
             fadeDistance={35}
             fadeStrength={1}
             infiniteGrid
@@ -378,7 +375,7 @@ function Scene({
       />
       <GizmoHelper alignment="bottom-right" margin={[76, 76]}>
         <GizmoViewport
-          axisColors={["#ef8c8c", "#86d19b", "#76a9ef"]}
+          axisColors={["#b26767", "#6f9a78", "#6887b0"]}
           labelColor="#d8e0e8"
         />
       </GizmoHelper>
@@ -394,6 +391,7 @@ export default function VisualLab({
   active?: boolean;
 }) {
   const phantom = useMemo(() => generateVolumePhantom(64), []);
+  const autoLoadStarted = useRef(false);
   const [mode, setMode] = useState<Mode>("volume");
   const [showGrid, setShowGrid] = useState(true);
   const [imported, setImported] = useState<Float32Array | null>(null);
@@ -404,15 +402,147 @@ export default function VisualLab({
   const [brightness, setBrightness] = useState(1.15);
   const [slice, setSlice] = useState<[number, number, number]>([32, 32, 32]);
   const [volume, setVolume] = useState<VolumeData>({
-    name: "Synthetic structural phantom",
+    name: "Engineering phantom",
     dims: [phantom.size, phantom.size, phantom.size],
     voxels: phantom.voxels,
     source: "synthetic",
   });
+  const [presets, setPresets] = useState<BrainPreset[]>([]);
+  const [activePreset, setActivePreset] = useState("");
+  const [presetBusy, setPresetBusy] = useState("");
   const [importError, setImportError] = useState("");
 
   const generated = useMemo(() => defaultPoints(), []);
   const positions = imported ?? generated;
+
+  const parseNifti = useCallback(
+    async (
+      incoming: ArrayBuffer,
+      name: string,
+      source: VolumeData["source"],
+      referenceUrl?: string,
+    ) => {
+      let buffer = incoming;
+
+      if (niftiReader.isCompressed(buffer)) {
+        buffer = niftiReader.decompress(buffer);
+      }
+
+      if (!niftiReader.isNIFTI(buffer)) {
+        throw new Error("Source is not a valid NIfTI-1/NIfTI-2 volume.");
+      }
+
+      const header = niftiReader.readHeader(buffer);
+      const image = niftiReader.readImage(header, buffer);
+      const dims: [number, number, number] = [
+        Number(header.dims[1]),
+        Number(header.dims[2]),
+        Number(header.dims[3]),
+      ];
+
+      if (
+        !dims.every((value) => Number.isFinite(value) && value > 0) ||
+        dims.some((value) => value > 1024)
+      ) {
+        throw new Error("NIfTI dimensions are outside the supported workstation envelope.");
+      }
+
+      const values = typedVolume(image, header.datatypeCode);
+      const voxelCount = dims[0] * dims[1] * dims[2];
+      const normalized = normalizeVolume(values, voxelCount);
+
+      setVolume({
+        name,
+        dims,
+        voxels: normalized,
+        source,
+        referenceUrl,
+      });
+      setSlice([
+        Math.floor(dims[0] / 2),
+        Math.floor(dims[1] / 2),
+        Math.floor(dims[2] / 2),
+      ]);
+      setMode("volume");
+      setSceneKey((value) => value + 1);
+    },
+    [],
+  );
+
+  const loadPreset = useCallback(
+    async (preset: BrainPreset) => {
+      if (presetBusy) return;
+      setImportError("");
+      setPresetBusy(preset.id);
+
+      try {
+        const response = await fetch(
+          `/api/neuro-presets?id=${encodeURIComponent(preset.id)}&download=1`,
+          { cache: "force-cache" },
+        );
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload?.error || `Preset request failed: ${response.status}`);
+        }
+
+        await parseNifti(
+          await response.arrayBuffer(),
+          preset.label,
+          "public",
+          preset.referenceUrl,
+        );
+        setActivePreset(preset.id);
+      } catch (error) {
+        setImportError(
+          error instanceof Error ? error.message : "Unable to load public neuro preset.",
+        );
+      } finally {
+        setPresetBusy("");
+      }
+    },
+    [parseNifti, presetBusy],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const response = await fetch("/api/neuro-presets", {
+          cache: "force-cache",
+        });
+        const payload = await response.json();
+        if (!cancelled && response.ok) {
+          setPresets(Array.isArray(payload.presets) ? payload.presets : []);
+        }
+      } catch {}
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      !active ||
+      autoLoadStarted.current ||
+      activePreset ||
+      !presets.length
+    ) {
+      return;
+    }
+
+    const preferred =
+      presets.find((preset) => preset.id === "harvard-oxford-2mm") ||
+      presets[0];
+
+    if (!preferred) return;
+    autoLoadStarted.current = true;
+    void loadPreset(preferred);
+  }, [active, activePreset, loadPreset, presets]);
 
   const importPoints = async (file?: File) => {
     if (!file) return;
@@ -449,41 +579,12 @@ export default function VisualLab({
     setImportError("");
 
     try {
-      let buffer = await file.arrayBuffer();
-
-      if (niftiReader.isCompressed(buffer)) {
-        buffer = niftiReader.decompress(buffer);
-      }
-
-      if (!niftiReader.isNIFTI(buffer)) {
-        throw new Error("File is not a valid NIfTI-1/NIfTI-2 volume.");
-      }
-
-      const header = niftiReader.readHeader(buffer);
-      const image = niftiReader.readImage(header, buffer);
-      const dims: [number, number, number] = [
-        Number(header.dims[1]),
-        Number(header.dims[2]),
-        Number(header.dims[3]),
-      ];
-
-      const values = typedVolume(image, header.datatypeCode);
-      const voxelCount = dims[0] * dims[1] * dims[2];
-      const normalized = normalizeVolume(values, voxelCount);
-
-      setVolume({
-        name: file.name,
-        dims,
-        voxels: normalized,
-        source: "nifti",
-      });
-      setSlice([
-        Math.floor(dims[0] / 2),
-        Math.floor(dims[1] / 2),
-        Math.floor(dims[2] / 2),
-      ]);
-      setMode("volume");
-      setSceneKey((value) => value + 1);
+      await parseNifti(
+        await file.arrayBuffer(),
+        file.name,
+        "nifti",
+      );
+      setActivePreset("");
     } catch (error) {
       setImportError(
         error instanceof Error ? error.message : "Unable to parse NIfTI volume.",
@@ -504,24 +605,19 @@ export default function VisualLab({
     <div className={`visual-workspace ${compact ? "visual-workspace-compact" : ""}`}>
       <aside className={`visual-tools ${compact ? "visual-tools-compact" : ""}`}>
         <div>
-          <div className="text-[10px] uppercase tracking-[.2em] text-slate-600">
-            Neuro 3D Space
-          </div>
-          <div className="mt-1 text-sm font-medium text-slate-200">
-            Volume & anatomy workstation
-          </div>
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            <span className="tag">GPU RAYCAST</span>
-            <span className="tag-muted">{webgpu ? "WEBGPU CAPABLE" : "WEBGL2"}</span>
+          <div className="visual-eyebrow">Neuro Spatial</div>
+          <div className="visual-title">Brain volume workstation</div>
+          <div className="visual-runtime-line">
+            WebGL2 volume ray casting
+            {webgpu ? " · WebGPU-capable host" : ""}
           </div>
         </div>
 
-        <div className="mt-6 space-y-2">
+        <div className="visual-mode-stack">
           {[
-            { id: "volume" as const, label: "Volume raycast", icon: Layers3 },
-            { id: "atlas" as const, label: "Cortical points", icon: Waypoints },
+            { id: "volume" as const, label: "Brain volume", icon: Layers3 },
+            { id: "atlas" as const, label: "Cortical field", icon: Waypoints },
             { id: "network" as const, label: "Connectome", icon: Braces },
-            { id: "scene" as const, label: "Scene geometry", icon: Box },
           ].map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -536,131 +632,187 @@ export default function VisualLab({
         </div>
 
         {mode === "volume" ? (
-          <div className="mt-5 border-t border-white/[.06] pt-5">
-            <div className="mb-3 text-[10px] uppercase tracking-[.16em] text-slate-650">
-              Transfer function
+          <>
+            <div className="visual-section">
+              <div className="visual-section-label">Public study presets</div>
+              <div className="visual-preset-stack">
+                {presets.length ? (
+                  presets.map((preset) => (
+                    <button
+                      key={preset.id}
+                      className={`visual-preset ${
+                        activePreset === preset.id ? "visual-preset-active" : ""
+                      }`}
+                      onClick={() => void loadPreset(preset)}
+                      disabled={Boolean(presetBusy)}
+                      title={preset.note}
+                    >
+                      <Brain size={13} />
+                      <span>
+                        <strong>{preset.label}</strong>
+                        <small>{preset.source} · {preset.kind}</small>
+                      </span>
+                      {presetBusy === preset.id ? (
+                        <Loader2 size={12} className="animate-spin" />
+                      ) : null}
+                    </button>
+                  ))
+                ) : (
+                  <div className="visual-preset-loading">
+                    <Loader2 size={12} className="animate-spin" />
+                    Loading public preset catalog
+                  </div>
+                )}
+              </div>
             </div>
-            <VolumeSlider
-              label="Threshold"
-              value={threshold}
-              min={0}
-              max={0.8}
-              step={0.01}
-              onChange={setThreshold}
-            />
-            <VolumeSlider
-              label="Density"
-              value={density}
-              min={0.25}
-              max={3}
-              step={0.05}
-              onChange={setDensity}
-            />
-            <VolumeSlider
-              label="Brightness"
-              value={brightness}
-              min={0.4}
-              max={2.2}
-              step={0.05}
-              onChange={setBrightness}
-            />
+
+            {!compact ? (
+              <div className="visual-section">
+                <div className="visual-section-label">Transfer function</div>
+                <VolumeSlider
+                  label="Threshold"
+                  value={threshold}
+                  min={0}
+                  max={0.8}
+                  step={0.01}
+                  onChange={setThreshold}
+                />
+                <VolumeSlider
+                  label="Density"
+                  value={density}
+                  min={0.25}
+                  max={3}
+                  step={0.05}
+                  onChange={setDensity}
+                />
+                <VolumeSlider
+                  label="Brightness"
+                  value={brightness}
+                  min={0.4}
+                  max={2.2}
+                  step={0.05}
+                  onChange={setBrightness}
+                />
+              </div>
+            ) : null}
+          </>
+        ) : null}
+
+        {!compact ? (
+          <div className="visual-section">
+            <div className="visual-section-label">Viewport</div>
+
+            <button
+              onClick={() =>
+                setQuality((value) =>
+                  value === "interactive" ? "uhd" : "interactive",
+                )
+              }
+              className="visual-tool-button"
+            >
+              <MonitorUp size={14} />
+              {quality === "uhd" ? "UHD / 4K mode" : "Interactive mode"}
+            </button>
+
+            <button
+              onClick={() => setShowGrid((value) => !value)}
+              className="visual-tool-button"
+            >
+              <Grid3X3 size={14} /> {showGrid ? "Hide grid" : "Show grid"}
+            </button>
+
+            <button
+              onClick={() => setSceneKey((value) => value + 1)}
+              className="visual-tool-button"
+            >
+              <RotateCcw size={14} /> Reset camera
+            </button>
           </div>
         ) : null}
 
-        <div className="mt-5 border-t border-white/[.06] pt-5">
-          <div className="mb-2 text-[10px] uppercase tracking-[.16em] text-slate-650">
-            Viewport
+        {!compact ? (
+          <div className="visual-section">
+            <div className="visual-section-label">Local import</div>
+
+            <label className="visual-tool-button cursor-pointer">
+              <Upload size={14} /> NIfTI .nii/.nii.gz
+              <input
+                type="file"
+                accept=".nii,.gz,.nii.gz,application/gzip,application/octet-stream"
+                className="hidden"
+                onChange={(event) => void importNifti(event.target.files?.[0])}
+              />
+            </label>
+
+            <label className="visual-tool-button cursor-pointer">
+              <Upload size={14} /> Point JSON
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={(event) => void importPoints(event.target.files?.[0])}
+              />
+            </label>
           </div>
+        ) : null}
 
-          <button
-            onClick={() =>
-              setQuality((value) =>
-                value === "interactive" ? "uhd" : "interactive",
-              )
-            }
-            className="visual-tool-button"
-          >
-            <MonitorUp size={14} />{" "}
-            {quality === "uhd" ? "UHD / 4K mode" : "Interactive mode"}
-          </button>
+        {importError ? (
+          <div className="visual-error">{importError}</div>
+        ) : null}
 
-          <button
-            onClick={() => setShowGrid((value) => !value)}
-            className="visual-tool-button"
-          >
-            <Grid3X3 size={14} /> {showGrid ? "Hide grid" : "Show grid"}
-          </button>
-
-          <button
-            onClick={() => setSceneKey((value) => value + 1)}
-            className="visual-tool-button"
-          >
-            <RotateCcw size={14} /> Reset camera
-          </button>
-        </div>
-
-        <div className="mt-5 border-t border-white/[.06] pt-5">
-          <div className="mb-2 text-[10px] uppercase tracking-[.16em] text-slate-650">
-            Import
+        <div className="visual-dataset-card">
+          <div className="visual-dataset-label">
+            <Cpu size={12} /> Active dataset
           </div>
-
-          <label className="visual-tool-button cursor-pointer">
-            <Upload size={14} /> NIfTI .nii/.nii.gz
-            <input
-              type="file"
-              accept=".nii,.gz,.nii.gz,application/gzip,application/octet-stream"
-              className="hidden"
-              onChange={(event) => void importNifti(event.target.files?.[0])}
-            />
-          </label>
-
-          <label className="visual-tool-button cursor-pointer">
-            <Upload size={14} /> Point JSON
-            <input
-              type="file"
-              accept=".json,application/json"
-              className="hidden"
-              onChange={(event) => void importPoints(event.target.files?.[0])}
-            />
-          </label>
-
-          {importError ? (
-            <div className="mt-2 rounded-lg border border-red-400/10 bg-red-400/[.03] p-2 text-[10px] leading-4 text-red-300/70">
-              {importError}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="mt-auto rounded-xl border border-white/[.06] bg-black/20 p-3">
-          <div className="flex items-center gap-2 text-[10px] uppercase tracking-[.15em] text-slate-650">
-            <Cpu size={12} /> Dataset
-          </div>
-          <div className="mt-2 truncate font-mono text-[10px] text-slate-300">
-            {mode === "volume" ? volume.name : `${Math.floor(positions.length / 3).toLocaleString()} points`}
+          <div className="visual-dataset-name">
+            {mode === "volume"
+              ? volume.name
+              : `${Math.floor(positions.length / 3).toLocaleString()} points`}
           </div>
           {mode === "volume" ? (
-            <div className="mt-1 font-mono text-[9px] text-slate-650">
-              {volume.dims.join(" × ")} · {volume.source.toUpperCase()}
-            </div>
+            <>
+              <div className="visual-dataset-meta">
+                {volume.dims.join(" × ")} · {volume.source.toUpperCase()}
+              </div>
+              {volume.referenceUrl ? (
+                <a
+                  href={volume.referenceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="visual-reference-link"
+                >
+                  Source record <ExternalLink size={10} />
+                </a>
+              ) : null}
+            </>
           ) : null}
         </div>
       </aside>
 
-      <div className={`relative flex-1 overflow-hidden bg-[#02060a] ${compact ? "min-h-[420px]" : "min-h-[760px]"}`}>
-        <div className="pointer-events-none absolute left-4 top-4 z-10 rounded-lg border border-white/[.06] bg-black/45 px-3 py-2 backdrop-blur">
-          <div className="text-[9px] uppercase tracking-[.18em] text-slate-600">
-            Viewport
-          </div>
-          <div className="mt-1 text-xs text-slate-300">
+      <div className={`relative flex-1 overflow-hidden bg-[#040608] ${
+        compact ? "min-h-[420px]" : "min-h-[760px]"
+      }`}>
+        <div className="visual-viewport-label">
+          <div>Viewport</div>
+          <strong>
             {mode === "volume"
-              ? "Direct GPU 3D texture ray-casting"
+              ? volume.source === "public"
+                ? "Public neuroanatomy volume"
+                : volume.source === "nifti"
+                  ? "Local NIfTI volume"
+                  : "Engineering phantom"
               : mode === "atlas"
-                ? "High-density point field"
-                : mode === "network"
-                  ? "Connectome topology"
-                  : "Scene workspace"}
-          </div>
+                ? "Cortical point field"
+                : "Connectome topology"}
+          </strong>
         </div>
+
+        {presetBusy ? (
+          <div className="visual-loading-overlay">
+            <Loader2 size={16} className="animate-spin" />
+            Loading public brain volume
+          </div>
+        ) : null}
 
         {mode === "volume" && !compact ? (
           <div className="absolute right-4 top-4 z-10 hidden grid-cols-3 gap-2 2xl:grid">
@@ -694,7 +846,7 @@ export default function VisualLab({
             powerPreference: "high-performance",
             preserveDrawingBuffer: false,
           }}
-          onCreated={({ gl }) => gl.setClearColor("#02060a")}
+          onCreated={({ gl }) => gl.setClearColor("#040608")}
         >
           <Scene
             mode={mode}
@@ -707,11 +859,11 @@ export default function VisualLab({
           />
         </Canvas>
 
-        <div className="pointer-events-none absolute bottom-4 left-4 z-10 flex gap-2">
-          <span className="tag-muted">THREE.JS</span>
-          <span className="tag-muted">3D TEXTURE</span>
-          <span className="tag-muted">GLSL RAYMARCH</span>
-          <span className="tag-muted">{quality === "uhd" ? "UHD" : "INTERACTIVE"}</span>
+        <div className="visual-runtime-footer">
+          <span>WebGL2</span>
+          <span>3D texture</span>
+          <span>GLSL ray marching</span>
+          <span>{quality === "uhd" ? "UHD" : "Interactive"}</span>
         </div>
       </div>
     </div>
@@ -735,7 +887,7 @@ function VolumeSlider({
 }) {
   return (
     <label className="mb-3 block">
-      <div className="mb-1.5 flex justify-between text-[9px] uppercase tracking-[.12em] text-slate-650">
+      <div className="mb-1.5 flex justify-between text-[10px] uppercase tracking-[.1em] text-slate-500">
         <span>{label}</span>
         <span>{value.toFixed(2)}</span>
       </div>
@@ -766,7 +918,11 @@ function SliceCanvas({
   const ref = useRef<HTMLCanvasElement>(null);
   const [x, y, z] = volume.dims;
   const maxIndex =
-    orientation === "axial" ? z - 1 : orientation === "coronal" ? y - 1 : x - 1;
+    orientation === "axial"
+      ? z - 1
+      : orientation === "coronal"
+        ? y - 1
+        : x - 1;
 
   useEffect(() => {
     const canvas = ref.current;
@@ -776,7 +932,12 @@ function SliceCanvas({
 
     const width = orientation === "sagittal" ? z : x;
     const height =
-      orientation === "axial" ? y : orientation === "coronal" ? z : y;
+      orientation === "axial"
+        ? y
+        : orientation === "coronal"
+          ? z
+          : y;
+
     canvas.width = width;
     canvas.height = height;
     const image = ctx.createImageData(width, height);
@@ -811,16 +972,17 @@ function SliceCanvas({
   }, [volume, orientation, index, x, y, z]);
 
   return (
-    <div className="w-36 rounded-lg border border-white/[.07] bg-black/55 p-2 backdrop-blur">
-      <div className="mb-1.5 flex items-center justify-between text-[8px] uppercase tracking-[.12em] text-slate-600">
-        <span>{orientation}</span><span>{index}/{maxIndex}</span>
+    <div className="w-36 rounded-lg border border-white/[.08] bg-black/75 p-2 backdrop-blur">
+      <div className="mb-1.5 flex items-center justify-between text-[9px] uppercase tracking-[.1em] text-slate-500">
+        <span>{orientation}</span>
+        <span>{index}/{maxIndex}</span>
       </div>
       <canvas
         ref={ref}
-        className="aspect-square w-full rounded bg-black object-contain [image-rendering:auto]"
+        className="aspect-square w-full rounded bg-black object-contain"
       />
       <input
-        className="mt-2 w-full accent-sky-300"
+        className="mt-2 w-full accent-slate-300"
         type="range"
         min={0}
         max={maxIndex}
@@ -882,7 +1044,10 @@ function normalizeVolume(
   for (let index = 0; index < length; index += 1) {
     const value = Number(values[index]);
     output[index] = Number.isFinite(value)
-      ? Math.max(0, Math.min(255, Math.round((value - min) * scale)))
+      ? Math.max(
+          0,
+          Math.min(255, Math.round((value - min) * scale)),
+        )
       : 0;
   }
 
