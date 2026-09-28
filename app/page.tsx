@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -15,7 +16,6 @@ import {
   ScanSearch,
   Settings2,
   Sparkles,
-  Waves,
 } from "lucide-react";
 
 import AcquisitionPanel from "@/components/workstation/acquisition-panel";
@@ -284,9 +284,12 @@ export default function Home() {
           <div className="px-3 pb-5 pt-3">
             <div className="flex items-center gap-3">
               <div className="morpheus-logo-shell">
-                <img
+                <Image
                   src="/morpheus-logo.png"
                   alt="Morpheus"
+                  width={38}
+                  height={38}
+                  priority
                   className="h-full w-full object-cover"
                 />
               </div>
