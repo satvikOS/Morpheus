@@ -1,11 +1,30 @@
 {
-  "framework": "nextjs",
-  "buildCommand": "npm run build",
-  "installCommand": "npm install",
-  "outputDirectory": ".next",
-  "functions": {
-    "app/api/**/*.ts": {
-      "maxDuration": 30
+  "services": {
+    "frontend": {
+      "root": ".",
+      "framework": "nextjs",
+      "buildCommand": "npm run build",
+      "installCommand": "npm install"
+    },
+    "signal-gateway": {
+      "root": "services/signal-gateway",
+      "runtime": "python3.11"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/signal-gateway/:path*",
+      "destination": {
+        "type": "service",
+        "service": "signal-gateway"
+      }
+    },
+    {
+      "source": "/:path*",
+      "destination": {
+        "type": "service",
+        "service": "frontend"
+      }
+    }
+  ]
 }
