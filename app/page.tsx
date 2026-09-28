@@ -66,6 +66,17 @@ export default function Home() {
   const [sourceName, setSourceName] = useState("");
   const packetCount = useRef(0);
   const lastMessageAt = useRef(0);
+  const ringBuffer = useRef(new Float32Array(8192));
+  const writeIndex = useRef(0);
+  const totalSamples = useRef(0);
+
+  const pushSample = (value: number) => {
+    const ring = ringBuffer.current;
+    ring[writeIndex.current] = value;
+    writeIndex.current = (writeIndex.current + 1) % ring.length;
+    totalSamples.current += 1;
+    packetCount.current += 1;
+  };
 
   useEffect(() => {
     try {
@@ -127,11 +138,10 @@ export default function Home() {
             const packet = JSON.parse(event.data) as SamplePacket;
             if (!Array.isArray(packet.channels) || !packet.channels.length) return;
             lastMessageAt.current = Date.now();
-            packetCount.current += 1;
             const simulated = packet.simulated || packet.stream.toLowerCase().includes("synthetic");
             setSourceMode(simulated ? "simulation" : "live");
             setSourceName(packet.stream || (simulated ? "Synthetic source" : "Live source"));
-            setSamples((current) => [...current, Number(packet.channels[0]) || 0].slice(-240));
+            pushSample(Number(packet.channels[0]) || 0);
           } catch {}
         };
         ws.onclose = () => {
@@ -164,15 +174,28 @@ export default function Home() {
         Math.sin(t * 6.4) * 0.26 +
         Math.sin(t * 13.2) * 0.08 +
         Math.sin(t * 1.2) * 0.035;
-      packetCount.current += 1;
+      pushSample(value);
       setSourceMode("simulation");
       setSourceName("Local synthetic fallback");
-      setSamples((current) => [...current, value].slice(-240));
     }, 40);
+
+    const renderTimer = window.setInterval(() => {
+      const ring = ringBuffer.current;
+      const count = Math.min(240, totalSamples.current, ring.length);
+      if (!count) return;
+
+      const snapshot = new Array<number>(count);
+      const start = (writeIndex.current - count + ring.length) % ring.length;
+      for (let index = 0; index < count; index += 1) {
+        snapshot[index] = ring[(start + index) % ring.length];
+      }
+      setSamples(snapshot);
+    }, 33);
 
     return () => {
       window.clearInterval(rateTimer);
       window.clearInterval(simulationTimer);
+      window.clearInterval(renderTimer);
     };
   }, []);
 
