@@ -84,6 +84,7 @@ export function useSignalEngine(
     let peer: RTCPeerConnection | null = null;
     let dataChannel: RTCDataChannel | null = null;
     let webrtcPackets = 0;
+    let webrtcActive = false;
 
     const fallbackHistory = Array.from(
       { length: MAX_CHANNELS },
@@ -268,11 +269,13 @@ export function useSignalEngine(
         await waitForDataChannel(dataChannel, 2500);
         if (cancelled) return false;
 
+        webrtcActive = true;
         setTransport("webrtc-datachannel");
         if (ring) Atomics.store(ring.control, CONTROL.STATE, 2);
 
         dataChannel.onclose = () => {
           if (cancelled) return;
+          webrtcActive = false;
           setTransport("webrtc-closed");
           setSourceMode("idle");
           startWorkerTransport();
@@ -306,7 +309,7 @@ export function useSignalEngine(
     })();
 
     const rateTimer = window.setInterval(() => {
-      if (transport === "webrtc-datachannel") {
+      if (webrtcActive) {
         setPacketRate(webrtcPackets);
         if (ring) Atomics.store(ring.control, CONTROL.PACKET_RATE, webrtcPackets);
         webrtcPackets = 0;
@@ -336,7 +339,7 @@ export function useSignalEngine(
           setSnapshots(next);
         }
 
-        if (transport !== "webrtc-datachannel") {
+        if (!webrtcActive) {
           setPacketRate(Atomics.load(ring.control, CONTROL.PACKET_RATE));
         }
         setDropped(Atomics.load(ring.control, CONTROL.DROPPED));
@@ -360,7 +363,7 @@ export function useSignalEngine(
       window.clearInterval(rateTimer);
       window.clearInterval(snapshotTimer);
     };
-  }, [gateway, selectedSourceId, connectionEpoch, ring, transport]);
+  }, [gateway, selectedSourceId, connectionEpoch, ring]);
 
   return {
     ring,
