@@ -18,6 +18,7 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
   const [events, setEvents] = useState<MarkerEvent[]>([]);
   const [label, setLabel] = useState("AWAKE_REPORT");
   const [sending, setSending] = useState(false);
+  const [armed, setArmed] = useState(false);
   const [sessionId, setSessionId] = useState("");
   const [recording, setRecording] = useState<{
     enabled: boolean;
@@ -72,22 +73,39 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
 
   const sendMarker = async () => {
     const markerLabel = label.trim();
-    if (!markerLabel || sending) return;
+    if (!markerLabel || sending || !armed) return;
+
     setSending(true);
-    const timestamp = Date.now() / 1000;
-    let source: MarkerEvent["source"] = "local";
+    let event: MarkerEvent = {
+      id: crypto.randomUUID(),
+      label: markerLabel,
+      timestamp: Date.now() / 1000,
+      source: "local",
+      clock_domain: "browser_untrusted",
+    };
+
     try {
       const response = await fetch(`${gateway.replace(/\/$/, "")}/markers`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label: markerLabel, timestamp }),
+        body: JSON.stringify({ label: markerLabel }),
       });
-      if (response.ok) source = "gateway";
+
+      if (response.ok) {
+        const payload = await response.json();
+        const marker = payload.marker || {};
+        event = {
+          id: crypto.randomUUID(),
+          label: markerLabel,
+          timestamp: Number(marker.timestamp || Date.now() / 1000),
+          wall_timestamp: Number(marker.wall_timestamp || 0) || undefined,
+          source: "gateway",
+          clock_domain: String(marker.clock_domain || "gateway"),
+        };
+      }
     } catch {}
-    setEvents((current) => [
-      { id: crypto.randomUUID(), label: markerLabel, timestamp, source },
-      ...current,
-    ].slice(0, 40));
+
+    setEvents((current) => [event, ...current].slice(0, 40));
     setSending(false);
   };
 
@@ -163,7 +181,19 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
         </Panel>
 
         <Panel>
-          <SectionHeader eyebrow="Synchronized events" title="Marker console" description="Markers timestamp experimental events. Gateway acknowledgement is recorded when available." />
+          <SectionHeader
+            eyebrow="Synchronized events"
+            title="Marker console"
+            description="Arm the marker plane before a trial. During an armed session, marker actions stay one-click so the operator does not lose timing; the gateway, not the browser clock, assigns the authoritative timestamp."
+            action={
+              <button
+                onClick={() => setArmed((value) => !value)}
+                className={armed ? "mode-pill mode-pill-live" : "mode-pill"}
+              >
+                {armed ? "ARMED" : "DISARMED"}
+              </button>
+            }
+          />
           <div className="space-y-3 p-4">
             <label className="block">
               <span className="mb-2 block text-[10px] uppercase tracking-[.16em] text-slate-600">Marker label</span>
@@ -179,9 +209,15 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
                 <button key={preset} onClick={() => setLabel(preset)} className="button-secondary justify-center text-[9px]">{preset}</button>
               ))}
             </div>
-            <button onClick={sendMarker} className="button-primary w-full"><Send size={13} /> {sending ? "Sending..." : "Emit marker"}</button>
-            <div className="rounded-xl border border-white/[.06] bg-black/15 p-3 text-[11px] leading-5 text-slate-600">
-              Local-only markers are useful for interface testing but are not equivalent to synchronized acquisition-clock markers.
+            <button
+              onClick={sendMarker}
+              disabled={!armed || sending}
+              className="button-primary w-full disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Send size={13} /> {sending ? "Sending..." : armed ? "Emit marker" : "Arm marker plane first"}
+            </button>
+            <div className="operator-note">
+              Gateway acknowledgements carry the authoritative LSL/system clock domain. If the gateway is unreachable, Morpheus records only an explicitly untrusted local UI event.
             </div>
           </div>
         </Panel>
@@ -197,7 +233,9 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
                   </span>
                   <div>
                     <div className="font-mono text-xs text-slate-300">{event.label}</div>
-                    <div className="mt-1 text-[10px] text-slate-650">{new Date(event.timestamp * 1000).toISOString()}</div>
+                    <div className="mt-1 text-[10px] text-slate-650">
+                      {new Date(event.timestamp * 1000).toISOString()} · {event.clock_domain || "unknown clock"}
+                    </div>
                   </div>
                   <span className={`tag-muted ${event.source === "gateway" ? "!text-emerald-300" : ""}`}>{event.source}</span>
                 </div>
