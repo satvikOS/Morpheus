@@ -49,9 +49,10 @@ export default function WorkspacePanel({
 }) {
   const [markerLabel, setMarkerLabel] = useState("AWAKE_REPORT");
   const [markerState, setMarkerState] = useState("READY");
+  const [markerArmed, setMarkerArmed] = useState(false);
 
   const emitMarker = async () => {
-    if (markerState === "SENDING") return;
+    if (markerState === "SENDING" || !markerArmed) return;
     setMarkerState("SENDING");
 
     try {
@@ -136,11 +137,23 @@ export default function WorkspacePanel({
               ),
             )}
           </div>
-          <button className="button-primary workspace-emit" onClick={emitMarker}>
-            <Send size={13} />
-            Emit {markerLabel}
-          </button>
-          <div className="workspace-marker-state">{markerState}</div>
+          <div className="workspace-action-row">
+            <button
+              className={markerArmed ? "mode-pill mode-pill-live" : "mode-pill"}
+              onClick={() => setMarkerArmed((value) => !value)}
+            >
+              {markerArmed ? "MARKERS ARMED" : "ARM MARKERS"}
+            </button>
+            <button
+              className="button-primary workspace-emit"
+              onClick={emitMarker}
+              disabled={!markerArmed || markerState === "SENDING"}
+            >
+              <Send size={13} />
+              {markerArmed ? `Emit ${markerLabel}` : "Arm first"}
+            </button>
+            <div className="workspace-marker-state">{markerState}</div>
+          </div>
           <p className="workspace-footnote">
             Browser click time is not used as the experimental timestamp. The gateway
             assigns the authoritative arrival/LSL time.
