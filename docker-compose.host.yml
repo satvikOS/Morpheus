@@ -1,0 +1,4 @@
+services:
+  signal-gateway:
+    network_mode: host
+    ports: []
