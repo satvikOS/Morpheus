@@ -1,0 +1,22 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://morpheus.local/schema/dream-record.schema.json",
+  "title":"Morpheus Dream Record",
+  "type":"object",
+  "required":["dream_id","captured_at","raw_report","raw_sha256"],
+  "properties":{
+    "dream_id":{"type":"string"},
+    "captured_at":{"type":"string","format":"date-time"},
+    "sleep_started_at":{"type":["string","null"],"format":"date-time"},
+    "awakened_at":{"type":["string","null"],"format":"date-time"},
+    "raw_report":{"type":"string","minLength":1},
+    "raw_sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},
+    "lucid":{"type":"boolean","default":false},
+    "agency":{"type":"integer","minimum":0,"maximum":5},
+    "confidence":{"type":"integer","minimum":0,"maximum":5},
+    "sensory_modalities":{"type":"array","items":{"enum":["visual","auditory","touch","pain","temperature","proprioception","vestibular","smell","taste","other"]},"uniqueItems":true},
+    "recurrence_links":{"type":"array","items":{"type":"object","required":["dream_id","relation"],"properties":{"dream_id":{"type":"string"},"relation":{"enum":["repeat","continuation","same_world","same_location","same_character","possible_match"]},"confidence":{"type":"integer","minimum":0,"maximum":5}}}},
+    "annotations":{"type":"object","additionalProperties":true}
+  },
+  "additionalProperties":false
+}
