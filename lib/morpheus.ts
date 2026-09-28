@@ -25,6 +25,9 @@ export type WorkstationView =
   | "acquisition"
   | "dataset"
   | "experiments"
+  | "programs"
+  | "models"
+  | "simulation"
   | "public-data"
   | "visual"
   | "system";
@@ -49,11 +52,33 @@ export type MarkerEvent = {
 
 export type PublicDataset = {
   id: string;
+  source?: string;
   title: string;
   description: string;
   version: string;
   modified: string;
   url: string;
+  modalities?: string[];
+  color?: string | null;
+};
+
+export type PublicDataSource = {
+  id: string;
+  label: string;
+  route: string;
+  ok: boolean;
+  latency_ms: number;
+  datasets: PublicDataset[];
+  error?: string | null;
+};
+
+export type ModelWorkerState = {
+  id: string;
+  name: string;
+  kind: "dsp" | "feature" | "simulation" | "inference";
+  status: "idle" | "running" | "ready" | "error";
+  backend: "browser-worker" | "gateway" | "gpu";
+  lastLatencyMs?: number;
 };
 
 export async function sha256(value: string) {
