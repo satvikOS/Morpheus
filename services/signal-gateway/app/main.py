@@ -371,7 +371,7 @@ async def synthetic_stream(ws: WebSocket) -> None:
 
 @app.websocket("/ws/samples")
 @app.websocket("/api/signal-gateway/ws/samples")
-async def websocket_samples(ws: WebSocket) -> None:
+async def websocket_samples(ws: WebSocket, source_id: str | None = None) -> None:
     await ws.accept()
 
     if resolve_streams is None or StreamInlet is None:
@@ -387,11 +387,26 @@ async def websocket_samples(ws: WebSocket) -> None:
         await synthetic_stream(ws)
         return
 
+    selected = discovered[0]
+    if source_id:
+        selected = next(
+            (
+                stream
+                for stream in discovered
+                if stream.source_id() == source_id
+                or stream.uid() == source_id
+                or stream.name() == source_id
+            ),
+            discovered[0],
+        )
+
     try:
-        inlet = StreamInlet(discovered[0], max_buflen=2, recover=True)
+        inlet = StreamInlet(selected, max_buflen=2, recover=True)
     except Exception:
         await synthetic_stream(ws)
         return
+
+    stream_name = selected.name()
 
     while True:
         try:
@@ -401,7 +416,6 @@ async def websocket_samples(ws: WebSocket) -> None:
                 continue
 
             channel_values = [float(value) for value in sample]
-            stream_name = inlet.info().name()
             RECORDER.write_sample(stream_name, float(timestamp), channel_values, False)
             await ws.send_text(
                 json.dumps(
