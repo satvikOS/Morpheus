@@ -25,6 +25,8 @@ export default function AcquisitionPanel({
   gateway,
   setGateway,
   reconnect,
+  selectedSourceId,
+  setSelectedSourceId,
 }: {
   status: GatewayStatus;
   streams: StreamInfo[];
@@ -37,6 +39,8 @@ export default function AcquisitionPanel({
   gateway: string;
   setGateway: (value: string) => void;
   reconnect: () => void;
+  selectedSourceId: string;
+  setSelectedSourceId: (value: string) => void;
 }) {
   const discoveredChannels = streams.reduce(
     (sum, stream) => sum + Number(stream.channel_count || 0),
@@ -135,6 +139,27 @@ export default function AcquisitionPanel({
                   className="w-full rounded-lg border border-white/[.08] bg-black/20 px-3 py-2.5 text-xs text-slate-300 outline-none transition focus:border-sky-300/30"
                   placeholder="/api/signal-gateway"
                 />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-[10px] uppercase tracking-[.16em] text-slate-600">
+                  Stream
+                </span>
+                <select
+                  value={selectedSourceId}
+                  onChange={(event) => setSelectedSourceId(event.target.value)}
+                  className="w-full rounded-lg border border-white/[.08] bg-black/20 px-3 py-2.5 text-xs text-slate-300 outline-none transition focus:border-sky-300/30"
+                >
+                  <option value="">Auto select first available</option>
+                  {streams.map((stream) => (
+                    <option
+                      key={stream.source_id || stream.name}
+                      value={stream.source_id || stream.name}
+                    >
+                      {stream.name} · {stream.channel_count} ch · {stream.nominal_srate || "irregular"} Hz
+                    </option>
+                  ))}
+                </select>
               </label>
 
               <button onClick={reconnect} className="button-primary w-full">
