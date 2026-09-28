@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -35,6 +36,12 @@ try:
 except Exception:
     BoardShim = None
 
+try:
+    from aiortc import RTCPeerConnection, RTCSessionDescription
+except Exception:
+    RTCPeerConnection = None
+    RTCSessionDescription = None
+
 app = FastAPI(title="Morpheus Signal Gateway", version="0.3.0")
 
 app.add_middleware(
@@ -47,6 +54,9 @@ app.add_middleware(
 
 MARKERS: deque[dict[str, Any]] = deque(maxlen=200)
 _marker_outlet: Any = None
+WEBRTC_PEERS: set[Any] = set()
+WEBRTC_TASKS: set[asyncio.Task[Any]] = set()
+MARKER_SEQUENCE = 0
 
 
 class LocalRecorder:
@@ -174,6 +184,12 @@ class RecordingStartRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=96)
 
 
+class WebRTCOffer(BaseModel):
+    sdp: str = Field(min_length=1)
+    type: str = Field(default="offer")
+    source_id: str | None = None
+
+
 def discover_lsl() -> list[dict[str, Any]]:
     if resolve_streams is None:
         return []
@@ -276,6 +292,7 @@ def capabilities() -> dict[str, Any]:
         "lsl": resolve_streams is not None,
         "brainflow": BoardShim is not None,
         "websocket_samples": True,
+        "webrtc_data_channel": RTCPeerConnection is not None,
         "markers": True,
         "synthetic_fallback": True,
         "recording": RECORDER.enabled,
@@ -330,10 +347,14 @@ def recording_stop() -> dict[str, Any]:
 @app.post("/markers")
 @app.post("/api/signal-gateway/markers")
 def markers(marker: MarkerRequest) -> dict[str, Any]:
+    global MARKER_SEQUENCE
+    MARKER_SEQUENCE += 1
     browser_timestamp = float(marker.timestamp) if marker.timestamp is not None else None
     authoritative_timestamp = float(local_clock()) if local_clock is not None else time.time()
     wall_timestamp = time.time()
     record = {
+        "sequence": MARKER_SEQUENCE,
+        "received_monotonic_ns": time.perf_counter_ns(),
         "label": marker.label,
         "timestamp": authoritative_timestamp,
         "wall_timestamp": wall_timestamp,
@@ -396,6 +417,139 @@ async def synthetic_stream(ws: WebSocket) -> None:
             await asyncio.sleep(0.02)
         except WebSocketDisconnect:
             return
+
+
+async def _synthetic_datachannel(channel: Any) -> None:
+    phase = 0.0
+    while getattr(channel, "readyState", "") == "open":
+        phase += 0.02
+        sample = [
+            0.31 * math.sin(phase * 6.2) + 0.07 * math.sin(phase * 14.5),
+            0.18 * math.sin(phase * 8.1 + 0.7),
+            0.11 * math.sin(phase * 3.3 + 1.2),
+            0.08 * math.sin(phase * 18.0 + 0.3),
+            0.16 * math.sin(phase * 5.1 + 1.8) + 0.04 * math.sin(phase * 21.0),
+            0.13 * math.sin(phase * 7.4 + 2.2),
+            0.09 * math.sin(phase * 11.6 + 0.9),
+            0.07 * math.sin(phase * 3.8 + 2.9),
+        ]
+        now = time.time()
+        channel.send(
+            json.dumps(
+                {
+                    "stream": "Morpheus Synthetic Reference",
+                    "ts": now,
+                    "channels": sample,
+                    "simulated": True,
+                    "transport": "webrtc",
+                }
+            )
+        )
+        await asyncio.sleep(0.02)
+
+
+async def _lsl_datachannel(channel: Any, source_id: str | None) -> None:
+    if resolve_streams is None or StreamInlet is None:
+        await _synthetic_datachannel(channel)
+        return
+
+    try:
+        discovered = resolve_streams(wait_time=0.65)
+    except Exception:
+        discovered = []
+
+    if not discovered:
+        await _synthetic_datachannel(channel)
+        return
+
+    selected = discovered[0]
+    if source_id:
+        selected = next(
+            (
+                stream
+                for stream in discovered
+                if stream.source_id() == source_id
+                or stream.uid() == source_id
+                or stream.name() == source_id
+            ),
+            discovered[0],
+        )
+
+    try:
+        inlet = StreamInlet(selected, max_buflen=2, recover=True)
+    except Exception:
+        await _synthetic_datachannel(channel)
+        return
+
+    stream_name = selected.name()
+    while getattr(channel, "readyState", "") == "open":
+        try:
+            sample, timestamp = await asyncio.to_thread(inlet.pull_sample, 0.2)
+            if sample is None:
+                await asyncio.sleep(0.001)
+                continue
+
+            channel_values = [float(value) for value in sample]
+            RECORDER.write_sample(stream_name, float(timestamp), channel_values, False)
+            channel.send(
+                json.dumps(
+                    {
+                        "stream": stream_name,
+                        "ts": float(timestamp),
+                        "channels": channel_values,
+                        "simulated": False,
+                        "transport": "webrtc",
+                    }
+                )
+            )
+        except Exception:
+            await asyncio.sleep(0.01)
+
+
+@app.post("/webrtc/offer")
+@app.post("/api/signal-gateway/webrtc/offer")
+async def webrtc_offer(offer: WebRTCOffer) -> Any:
+    if RTCPeerConnection is None or RTCSessionDescription is None:
+        return JSONResponse(
+            status_code=501,
+            content={
+                "available": False,
+                "reason": "WebRTC is a local-gateway capability. Install requirements-local.txt.",
+            },
+        )
+
+    pc = RTCPeerConnection()
+    WEBRTC_PEERS.add(pc)
+
+    @pc.on("datachannel")
+    def on_datachannel(channel: Any) -> None:
+        if channel.label != "morpheus-samples":
+            return
+
+        @channel.on("open")
+        def on_open() -> None:
+            task = asyncio.create_task(_lsl_datachannel(channel, offer.source_id))
+            WEBRTC_TASKS.add(task)
+            task.add_done_callback(WEBRTC_TASKS.discard)
+
+    @pc.on("connectionstatechange")
+    async def on_connectionstatechange() -> None:
+        if pc.connectionState in {"failed", "closed", "disconnected"}:
+            WEBRTC_PEERS.discard(pc)
+            if pc.connectionState != "closed":
+                await pc.close()
+
+    await pc.setRemoteDescription(
+        RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+    )
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    return {
+        "available": True,
+        "sdp": pc.localDescription.sdp,
+        "type": pc.localDescription.type,
+    }
 
 
 @app.websocket("/ws/samples")
