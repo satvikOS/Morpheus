@@ -1,15 +1,13 @@
 [project]
 name = "morpheus-signal-gateway"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi==0.118.0",
-  "uvicorn[standard]==0.37.0",
   "pydantic==2.11.9",
-  "pylsl==1.17.6",
-  "brainflow==5.18.1",
-  "numpy==2.3.3",
-  "mne==1.10.1",
-  "pyxdf==1.17.0",
-  "scipy==1.16.2"
+  "uvicorn[standard]==0.37.0"
 ]
+
+# The cloud service intentionally stays lightweight.
+# Full local acquisition dependencies (pylsl, BrainFlow, MNE, pyxdf,
+# NumPy and SciPy) remain in requirements.txt for the workstation gateway.
