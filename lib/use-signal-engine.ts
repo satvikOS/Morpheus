@@ -50,7 +50,10 @@ export function useSignalEngine(
   const [snapshots, setSnapshots] = useState<number[][]>([]);
 
   const ring = useMemo<SharedSignalRing | null>(() => {
-    if (typeof window === "undefined" || typeof SharedArrayBuffer === "undefined") {
+    if (
+      typeof window === "undefined" ||
+      typeof SharedArrayBuffer === "undefined"
+    ) {
       return null;
     }
 
@@ -58,7 +61,9 @@ export function useSignalEngine(
       const dataBuffer = new SharedArrayBuffer(
         Float32Array.BYTES_PER_ELEMENT * MAX_CHANNELS * CAPACITY,
       );
-      const controlBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 16);
+      const controlBuffer = new SharedArrayBuffer(
+        Int32Array.BYTES_PER_ELEMENT * 16,
+      );
 
       return {
         data: new Float32Array(dataBuffer),
@@ -74,62 +79,239 @@ export function useSignalEngine(
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const worker = new Worker("/workers/stream-worker.js");
-    const sourceQuery = selectedSourceId
-      ? `?source_id=${encodeURIComponent(selectedSourceId)}`
-      : "";
-    const url = buildWebSocketUrl(gateway, `/ws/samples${sourceQuery}`);
+    let cancelled = false;
+    let worker: Worker | null = null;
+    let peer: RTCPeerConnection | null = null;
+    let dataChannel: RTCDataChannel | null = null;
+    let webrtcPackets = 0;
 
     const fallbackHistory = Array.from(
       { length: MAX_CHANNELS },
       () => [] as number[],
     );
 
-    worker.onmessage = (event) => {
-      const message = event.data || {};
+    const clearRing = () => {
+      if (!ring) return;
+      ring.control.fill(0);
+      ring.data.fill(0);
+    };
 
-      if (message.type === "metrics") {
-        setPacketRate(Number(message.packetRate || 0));
-        setDropped(Number(message.dropped || 0));
-        if (message.sourceName) setSourceName(String(message.sourceName));
-        if (message.simulated) {
-          setSourceMode("simulation");
-        } else if (message.state === 2) {
-          setSourceMode("live");
+    const incrementDropped = () => {
+      if (ring) {
+        setDropped(Atomics.add(ring.control, CONTROL.DROPPED, 1) + 1);
+      } else {
+        setDropped((value) => value + 1);
+      }
+    };
+
+    const writeFrame = (
+      values: number[],
+      timestamp: number,
+      simulated: boolean,
+      name: string,
+    ) => {
+      const bounded = values.slice(0, MAX_CHANNELS);
+      if (!bounded.length) return;
+
+      if (ring) {
+        const writeIndex = Atomics.load(ring.control, CONTROL.WRITE_INDEX);
+        const base = writeIndex * MAX_CHANNELS;
+
+        for (let channel = 0; channel < MAX_CHANNELS; channel += 1) {
+          const value = channel < bounded.length ? Number(bounded[channel]) : 0;
+          ring.data[base + channel] = Number.isFinite(value) ? value : 0;
         }
-        return;
-      }
 
-      if (message.type === "transport") {
-        setTransport(String(message.transport || "unknown"));
-        if (message.state === "simulation") setSourceMode("simulation");
-        if (message.state === "offline") setSourceMode("idle");
-        return;
-      }
-
-      if (message.type === "frame" && Array.isArray(message.channels)) {
-        const values = message.channels.slice(0, MAX_CHANNELS);
-        values.forEach((value: number, index: number) => {
+        Atomics.store(ring.control, CONTROL.CHANNELS, bounded.length);
+        Atomics.store(ring.control, CONTROL.SIMULATED, simulated ? 1 : 0);
+        Atomics.store(
+          ring.control,
+          CONTROL.LAST_TS_MS,
+          Math.floor(timestamp * 1000) & 0x7fffffff,
+        );
+        Atomics.add(ring.control, CONTROL.TOTAL_FRAMES, 1);
+        Atomics.store(
+          ring.control,
+          CONTROL.WRITE_INDEX,
+          (writeIndex + 1) % CAPACITY,
+        );
+      } else {
+        bounded.forEach((value, index) => {
           const history = fallbackHistory[index];
           history.push(Number(value) || 0);
           if (history.length > SNAPSHOT_SAMPLES) {
             history.splice(0, history.length - SNAPSHOT_SAMPLES);
           }
         });
+      }
 
-        setSourceName(String(message.sourceName || "Fallback stream"));
-        setSourceMode(message.simulated ? "simulation" : "live");
+      setSourceName(name || "Unknown stream");
+      setSourceMode(simulated ? "simulation" : "live");
+    };
+
+    const startWorkerTransport = () => {
+      if (cancelled || worker) return;
+
+      const sourceQuery = selectedSourceId
+        ? `?source_id=${encodeURIComponent(selectedSourceId)}`
+        : "";
+      const url = buildWebSocketUrl(
+        gateway,
+        `/ws/samples${sourceQuery}`,
+      );
+
+      worker = new Worker("/workers/stream-worker.js");
+
+      worker.onmessage = (event) => {
+        const message = event.data || {};
+
+        if (message.type === "metrics") {
+          setPacketRate(Number(message.packetRate || 0));
+          setDropped(Number(message.dropped || 0));
+          if (message.sourceName) setSourceName(String(message.sourceName));
+          if (message.simulated) {
+            setSourceMode("simulation");
+          } else if (message.state === 2) {
+            setSourceMode("live");
+          }
+          return;
+        }
+
+        if (message.type === "transport") {
+          setTransport(String(message.transport || "unknown"));
+          if (message.state === "simulation") setSourceMode("simulation");
+          if (message.state === "offline") setSourceMode("idle");
+          return;
+        }
+
+        if (message.type === "frame" && Array.isArray(message.channels)) {
+          writeFrame(
+            message.channels.map(Number),
+            Number(message.timestamp || Date.now() / 1000),
+            Boolean(message.simulated),
+            String(message.sourceName || "Fallback stream"),
+          );
+        }
+      };
+
+      worker.postMessage({
+        type: "connect",
+        url,
+        maxChannels: MAX_CHANNELS,
+        capacity: CAPACITY,
+        dataBuffer: ring?.data.buffer,
+        controlBuffer: ring?.control.buffer,
+      });
+    };
+
+    const tryWebRTC = async () => {
+      if (!("RTCPeerConnection" in window)) return false;
+
+      try {
+        peer = new RTCPeerConnection({ iceServers: [] });
+        dataChannel = peer.createDataChannel("morpheus-samples", {
+          ordered: false,
+          maxRetransmits: 0,
+        });
+
+        dataChannel.binaryType = "arraybuffer";
+
+        dataChannel.onmessage = (event) => {
+          try {
+            const packet =
+              typeof event.data === "string"
+                ? JSON.parse(event.data)
+                : JSON.parse(new TextDecoder().decode(event.data));
+
+            const channels = Array.isArray(packet.channels)
+              ? packet.channels.map(Number)
+              : [];
+            writeFrame(
+              channels,
+              Number(packet.ts || Date.now() / 1000),
+              Boolean(packet.simulated),
+              String(packet.stream || "WebRTC stream"),
+            );
+            webrtcPackets += 1;
+          } catch {
+            incrementDropped();
+          }
+        };
+
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        await waitForIceGathering(peer, 1300);
+
+        const endpoint = `${gateway.replace(/\/$/, "")}/webrtc/offer`;
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sdp: peer.localDescription?.sdp,
+            type: peer.localDescription?.type || "offer",
+            source_id: selectedSourceId || null,
+          }),
+        });
+
+        if (!response.ok) throw new Error(`WebRTC signaling failed: ${response.status}`);
+
+        const answer = await response.json();
+        if (!answer.available || !answer.sdp) {
+          throw new Error(answer.reason || "WebRTC unavailable");
+        }
+
+        await peer.setRemoteDescription({
+          sdp: answer.sdp,
+          type: answer.type || "answer",
+        });
+
+        await waitForDataChannel(dataChannel, 2500);
+        if (cancelled) return false;
+
+        setTransport("webrtc-datachannel");
+        if (ring) Atomics.store(ring.control, CONTROL.STATE, 2);
+
+        dataChannel.onclose = () => {
+          if (cancelled) return;
+          setTransport("webrtc-closed");
+          setSourceMode("idle");
+          startWorkerTransport();
+        };
+
+        dataChannel.onerror = () => {
+          if (cancelled) return;
+          incrementDropped();
+        };
+
+        return true;
+      } catch {
+        try {
+          dataChannel?.close();
+          peer?.close();
+        } catch {}
+        dataChannel = null;
+        peer = null;
+        return false;
       }
     };
 
-    worker.postMessage({
-      type: "connect",
-      url,
-      maxChannels: MAX_CHANNELS,
-      capacity: CAPACITY,
-      dataBuffer: ring?.data.buffer,
-      controlBuffer: ring?.control.buffer,
-    });
+    clearRing();
+    setTransport("negotiating");
+
+    void (async () => {
+      const connected = await tryWebRTC();
+      if (!connected && !cancelled) {
+        startWorkerTransport();
+      }
+    })();
+
+    const rateTimer = window.setInterval(() => {
+      if (transport === "webrtc-datachannel") {
+        setPacketRate(webrtcPackets);
+        if (ring) Atomics.store(ring.control, CONTROL.PACKET_RATE, webrtcPackets);
+        webrtcPackets = 0;
+      }
+    }, 1000);
 
     const snapshotTimer = window.setInterval(() => {
       if (ring) {
@@ -154,7 +336,9 @@ export function useSignalEngine(
           setSnapshots(next);
         }
 
-        setPacketRate(Atomics.load(ring.control, CONTROL.PACKET_RATE));
+        if (transport !== "webrtc-datachannel") {
+          setPacketRate(Atomics.load(ring.control, CONTROL.PACKET_RATE));
+        }
         setDropped(Atomics.load(ring.control, CONTROL.DROPPED));
         const simulated = Atomics.load(ring.control, CONTROL.SIMULATED) === 1;
         const state = Atomics.load(ring.control, CONTROL.STATE);
@@ -168,11 +352,15 @@ export function useSignalEngine(
     }, 250);
 
     return () => {
-      worker.postMessage({ type: "disconnect" });
-      worker.terminate();
+      cancelled = true;
+      worker?.postMessage({ type: "disconnect" });
+      worker?.terminate();
+      dataChannel?.close();
+      peer?.close();
+      window.clearInterval(rateTimer);
       window.clearInterval(snapshotTimer);
     };
-  }, [gateway, selectedSourceId, connectionEpoch, ring]);
+  }, [gateway, selectedSourceId, connectionEpoch, ring, transport]);
 
   return {
     ring,
@@ -184,4 +372,60 @@ export function useSignalEngine(
     transport,
     sharedMemory: Boolean(ring && globalThis.crossOriginIsolated),
   };
+}
+
+async function waitForIceGathering(
+  peer: RTCPeerConnection,
+  timeoutMs: number,
+) {
+  if (peer.iceGatheringState === "complete") return;
+
+  await new Promise<void>((resolve) => {
+    const timer = window.setTimeout(done, timeoutMs);
+
+    function done() {
+      window.clearTimeout(timer);
+      peer.removeEventListener("icegatheringstatechange", onChange);
+      resolve();
+    }
+
+    function onChange() {
+      if (peer.iceGatheringState === "complete") done();
+    }
+
+    peer.addEventListener("icegatheringstatechange", onChange);
+  });
+}
+
+async function waitForDataChannel(
+  channel: RTCDataChannel,
+  timeoutMs: number,
+) {
+  if (channel.readyState === "open") return;
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("WebRTC data channel timeout"));
+    }, timeoutMs);
+
+    const open = () => {
+      cleanup();
+      resolve();
+    };
+
+    const fail = () => {
+      cleanup();
+      reject(new Error("WebRTC data channel failed"));
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      channel.removeEventListener("open", open);
+      channel.removeEventListener("error", fail);
+    };
+
+    channel.addEventListener("open", open);
+    channel.addEventListener("error", fail);
+  });
 }
