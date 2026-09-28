@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { CircleDot, FlaskConical, Play, Plus, Send, TimerReset } from "lucide-react";
+import { useEffect, useState } from "react";
+import { CircleDot, DatabaseBackup, Pause, Play, Plus, Send, TimerReset } from "lucide-react";
 import type { MarkerEvent } from "@/lib/morpheus";
 import { Panel, SectionHeader } from "./ui";
 
@@ -18,6 +18,57 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
   const [events, setEvents] = useState<MarkerEvent[]>([]);
   const [label, setLabel] = useState("AWAKE_REPORT");
   const [sending, setSending] = useState(false);
+  const [sessionId, setSessionId] = useState("");
+  const [recording, setRecording] = useState<{
+    enabled: boolean;
+    active: boolean;
+    session_id?: string | null;
+    samples?: number;
+    markers?: number;
+    path?: string | null;
+  }>({ enabled: false, active: false });
+  const [recordingBusy, setRecordingBusy] = useState(false);
+
+  const refreshRecording = async () => {
+    try {
+      const response = await fetch(`${gateway.replace(/\/$/, "")}/recording`, { cache: "no-store" });
+      if (!response.ok) return;
+      const payload = await response.json();
+      setRecording(payload);
+    } catch {}
+  };
+
+  useEffect(() => {
+    void refreshRecording();
+    const timer = window.setInterval(() => void refreshRecording(), 2500);
+    return () => window.clearInterval(timer);
+  }, [gateway]);
+
+  const toggleRecording = async () => {
+    if (recordingBusy) return;
+    setRecordingBusy(true);
+    try {
+      const base = gateway.replace(/\/$/, "");
+      const response = await fetch(
+        recording.active ? `${base}/recording/stop` : `${base}/recording/start`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: recording.active ? "{}" : JSON.stringify({ session_id: sessionId.trim() || null }),
+        },
+      );
+      const payload = await response.json();
+      if (recording.active) {
+        setRecording((current) => ({ ...current, active: false }));
+      } else if (payload.started) {
+        setRecording((current) => ({ ...current, active: true, session_id: payload.session_id, path: payload.path }));
+      }
+      await refreshRecording();
+    } catch {
+    } finally {
+      setRecordingBusy(false);
+    }
+  };
 
   const sendMarker = async () => {
     const markerLabel = label.trim();
@@ -63,6 +114,55 @@ export default function ExperimentsPanel({ gateway }: { gateway: string }) {
       </Panel>
 
       <div className="grid gap-4 xl:grid-cols-[.65fr_1.35fr]">
+        <Panel>
+          <SectionHeader
+            eyebrow="Local session recorder"
+            title="Acquisition recording"
+            description="Authoritative raw recording is local-only. On the local gateway, set MORPHEUS_LOCAL_RECORDING_DIR to enable newline-delimited session capture with synchronized markers."
+            action={
+              <span className={recording.active ? "tag" : "tag-muted"}>
+                {recording.active ? "RECORDING" : recording.enabled ? "READY" : "LOCAL ONLY"}
+              </span>
+            }
+          />
+          <div className="space-y-3 p-4">
+            <label className="block">
+              <span className="mb-2 block text-[10px] uppercase tracking-[.16em] text-slate-600">Session ID</span>
+              <input
+                value={recording.active ? recording.session_id || "" : sessionId}
+                disabled={recording.active}
+                onChange={(event) => setSessionId(event.target.value.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 96))}
+                placeholder="m2-reinstatement-001"
+                className="w-full rounded-lg border border-white/[.08] bg-black/20 px-3 py-2.5 font-mono text-xs text-slate-300 outline-none disabled:opacity-60"
+              />
+            </label>
+            <button
+              onClick={toggleRecording}
+              disabled={recordingBusy || (!recording.enabled && !recording.active)}
+              className="button-primary w-full disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {recording.active ? <Pause size={13} /> : <DatabaseBackup size={13} />}
+              {recordingBusy ? "Updating..." : recording.active ? "Stop local recording" : "Start local recording"}
+            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-white/[.06] bg-black/15 p-3">
+                <div className="text-[9px] uppercase tracking-[.15em] text-slate-650">Samples</div>
+                <div className="mt-2 font-mono text-sm text-slate-300">{recording.samples ?? 0}</div>
+              </div>
+              <div className="rounded-lg border border-white/[.06] bg-black/15 p-3">
+                <div className="text-[9px] uppercase tracking-[.15em] text-slate-650">Markers</div>
+                <div className="mt-2 font-mono text-sm text-slate-300">{recording.markers ?? 0}</div>
+              </div>
+            </div>
+            {!recording.enabled ? (
+              <div className="rounded-xl border border-amber-300/10 bg-amber-300/[.025] p-3 text-[11px] leading-5 text-slate-600">
+                Hosted Vercel mode intentionally cannot retain raw neural sessions. Run the local gateway and set MORPHEUS_LOCAL_RECORDING_DIR to activate this recorder.
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+
+        <Panel>
         <Panel>
           <SectionHeader eyebrow="Synchronized events" title="Marker console" description="Markers timestamp experimental events. Gateway acknowledgement is recorded when available." />
           <div className="space-y-3 p-4">
