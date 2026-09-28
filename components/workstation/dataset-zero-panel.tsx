@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Check, Download, FileKey2, Fingerprint, LockKeyhole, Trash2 } from "lucide-react";
 import type { DreamRecord } from "@/lib/morpheus";
 import { downloadJson, sha256 } from "@/lib/morpheus";
+import { recurrenceCandidates } from "@/lib/dream-analysis";
 import { EmptyState, Metric, Panel, SectionHeader } from "./ui";
 
 const STORAGE_KEY = "morpheus.dataset-zero.v1";
@@ -62,6 +63,7 @@ export default function DatasetZeroPanel() {
     () => records.reduce((sum, record) => sum + record.raw_report.split(/\s+/).filter(Boolean).length, 0),
     [records],
   );
+  const candidates = useMemo(() => recurrenceCandidates(records, 8), [records]);
 
   return (
     <div className="space-y-4">
@@ -207,6 +209,33 @@ export default function DatasetZeroPanel() {
           )}
         </Panel>
       </div>
+
+      <Panel>
+        <SectionHeader
+          eyebrow="M1 local baseline"
+          title="Recurrence candidates"
+          description="A deterministic local lexical/tag/modality baseline ranks candidate dream pairs without uploading raw reports. It is a screening tool, not evidence that two dreams are the same episode."
+          action={<span className="tag-muted">{candidates.length} PAIRS</span>}
+        />
+        {candidates.length ? (
+          <div className="divide-y divide-white/[.055]">
+            {candidates.map((pair) => (
+              <div key={`${pair.a}-${pair.b}`} className="grid gap-3 px-4 py-3 lg:grid-cols-[1fr_1fr_100px_1.2fr] lg:items-center">
+                <span className="truncate font-mono text-[10px] text-slate-400">{pair.a}</span>
+                <span className="truncate font-mono text-[10px] text-slate-400">{pair.b}</span>
+                <span className="font-mono text-xs text-sky-200">{(pair.score * 100).toFixed(1)}%</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {pair.sharedTokens.length ? pair.sharedTokens.map((token) => (
+                    <span key={token} className="tag-muted">{token}</span>
+                  )) : <span className="text-[10px] text-slate-700">no shared lexical tokens</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState>At least two local records are required for recurrence screening.</EmptyState>
+        )}
+      </Panel>
     </div>
   );
 }
