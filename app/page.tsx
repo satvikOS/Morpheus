@@ -171,7 +171,7 @@ export default function Home() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [gateway, connectionEpoch, selectedSourceId]);
+  }, [gateway, connectionEpoch]);
 
   useEffect(() => {
     let ws: WebSocket | undefined;
@@ -222,7 +222,7 @@ export default function Home() {
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       ws?.close();
     };
-  }, [gateway, connectionEpoch]);
+  }, [gateway, connectionEpoch, selectedSourceId]);
 
   useEffect(() => {
     const rateTimer = window.setInterval(() => {
