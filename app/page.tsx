@@ -87,6 +87,7 @@ export default function Home() {
   const [sourceMode, setSourceMode] =
     useState<"live" | "simulation" | "idle">("idle");
   const [sourceName, setSourceName] = useState("");
+  const [selectedSourceId, setSelectedSourceId] = useState("");
 
   const packetCount = useRef(0);
   const lastMessageAt = useRef(0);
@@ -170,7 +171,7 @@ export default function Home() {
       active = false;
       window.clearInterval(timer);
     };
-  }, [gateway, connectionEpoch]);
+  }, [gateway, connectionEpoch, selectedSourceId]);
 
   useEffect(() => {
     let ws: WebSocket | undefined;
@@ -181,7 +182,10 @@ export default function Home() {
       if (closed) return;
 
       try {
-        ws = new WebSocket(buildWebSocketUrl(gateway, "/ws/samples"));
+        const sourceQuery = selectedSourceId
+          ? `?source_id=${encodeURIComponent(selectedSourceId)}`
+          : "";
+        ws = new WebSocket(buildWebSocketUrl(gateway, `/ws/samples${sourceQuery}`));
 
         ws.onmessage = (event) => {
           try {
@@ -423,6 +427,8 @@ export default function Home() {
                 gateway={gateway}
                 setGateway={setGateway}
                 reconnect={() => setConnectionEpoch((value) => value + 1)}
+                selectedSourceId={selectedSourceId}
+                setSelectedSourceId={setSelectedSourceId}
               />
             ) : null}
 
