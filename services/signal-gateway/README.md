@@ -69,3 +69,42 @@ For research-grade acquisition, the roadmap remains XDF/NWB session recording wi
 - device lifecycle control through BrainFlow
 - Rust/C++ hot path where profiling demonstrates Python overhead
 - local GPU inference workers
+
+
+## WebRTC data channel
+
+The local dependency profile includes `aiortc`. When installed, the gateway exposes:
+
+- `POST /webrtc/offer`
+
+The browser first negotiates an unordered, zero-retransmit `morpheus-samples` DataChannel. If negotiation fails or the local profile is unavailable, Morpheus automatically falls back to the Worker-owned WebSocket transport. WebRTC is therefore an optimization for the local workstation path, not a requirement for the hosted Vercel service.
+
+```bash
+pip install -r requirements-local.txt
+```
+
+## Docker
+
+```bash
+docker compose up --build
+```
+
+The standard Compose profile exposes the gateway on port 8787 and stores sessions under `.morpheus-recordings`. LSL uses local multicast discovery, so laboratories that require host networking can use:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host.yml up --build
+```
+
+Native execution remains preferable when the host/container networking layer interferes with LSL multicast discovery.
+
+## NWB conversion
+
+The local dependency profile includes PyNWB. Engineering JSONL recordings can be converted into an NWB file without uploading the session:
+
+```bash
+python tools/jsonl_to_nwb.py \
+  /path/to/session.jsonl \
+  /path/to/session.nwb
+```
+
+The converter preserves sample timestamps, simulation flags, and gateway marker metadata. It intentionally uses `a.u.` for signal units unless calibrated source metadata establishes a physical unit; Morpheus does not invent EEG calibration metadata.
