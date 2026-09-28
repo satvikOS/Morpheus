@@ -386,7 +386,7 @@ function Scene({
   );
 }
 
-export default function VisualLab() {
+export default function VisualLab({ compact = false }: { compact?: boolean }) {
   const phantom = useMemo(() => generateVolumePhantom(64), []);
   const [mode, setMode] = useState<Mode>("volume");
   const [showGrid, setShowGrid] = useState(true);
@@ -495,8 +495,8 @@ export default function VisualLab() {
         : Math.min(window.devicePixelRatio, 1.35);
 
   return (
-    <div className="visual-workspace">
-      <aside className="visual-tools">
+    <div className={`visual-workspace ${compact ? "visual-workspace-compact" : ""}`}>
+      <aside className={`visual-tools ${compact ? "visual-tools-compact" : ""}`}>
         <div>
           <div className="text-[10px] uppercase tracking-[.2em] text-slate-600">
             Neuro 3D Space
@@ -640,7 +640,7 @@ export default function VisualLab() {
         </div>
       </aside>
 
-      <div className="relative min-h-[760px] flex-1 overflow-hidden bg-[#02060a]">
+      <div className={`relative flex-1 overflow-hidden bg-[#02060a] ${compact ? "min-h-[420px]" : "min-h-[760px]"}`}>
         <div className="pointer-events-none absolute left-4 top-4 z-10 rounded-lg border border-white/[.06] bg-black/45 px-3 py-2 backdrop-blur">
           <div className="text-[9px] uppercase tracking-[.18em] text-slate-600">
             Viewport
@@ -656,7 +656,7 @@ export default function VisualLab() {
           </div>
         </div>
 
-        {mode === "volume" ? (
+        {mode === "volume" && !compact ? (
           <div className="absolute right-4 top-4 z-10 hidden grid-cols-3 gap-2 2xl:grid">
             <SliceCanvas
               volume={volume}
