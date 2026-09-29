@@ -36,6 +36,8 @@ export type MarkerEmitResult = {
     wall_timestamp?: number;
     clock_domain?: string;
     timestamp_method?: string;
+    temporal_status?: "software_clock_mapped" | "gateway_arrival_only";
+    hardware_trigger_verified?: boolean;
     sync_uncertainty_ms?: number | null;
   };
 };
@@ -73,6 +75,7 @@ const CONTROL = {
 const MAX_CHANNELS = 32;
 const CAPACITY = 32768;
 const SNAPSHOT_SAMPLES = 1024;
+const MAX_MARKER_SYNC_UNCERTAINTY_MS = 5;
 
 type PendingMarker = {
   resolve: (value: MarkerEmitResult) => void;
@@ -236,13 +239,17 @@ export function useSignalEngine(
           : 0;
       const bestRtt = best[0].rttMs;
       const uncertaintyMs = Math.max(bestRtt / 2, spreadMs / 2);
+      const acceptableForMarkers =
+        uncertaintyMs <= MAX_MARKER_SYNC_UNCERTAINTY_MS;
 
       setClockSync({
-        ready: true,
-        offsetSeconds: medianOffset,
+        ready: acceptableForMarkers,
+        offsetSeconds: acceptableForMarkers ? medianOffset : 0,
         rttMs: bestRtt,
         uncertaintyMs,
-        clockDomain: best[0].clockDomain,
+        clockDomain: acceptableForMarkers
+          ? best[0].clockDomain
+          : "gateway_clock_uncertainty_too_high",
         sampledAt: Date.now(),
       });
     };
@@ -264,11 +271,6 @@ export function useSignalEngine(
     let peer: RTCPeerConnection | null = null;
     let sampleChannel: RTCDataChannel | null = null;
     let controlChannel: RTCDataChannel | null = null;
-    const fallbackHistory = Array.from(
-      { length: MAX_CHANNELS },
-      () => [] as number[],
-    );
-
     if (ring) {
       ring.control.fill(0);
       ring.data.fill(0);
@@ -304,6 +306,14 @@ export function useSignalEngine(
         if (message.sourceName) setSourceName(String(message.sourceName));
         const rate = Number(message.sampleRate);
         if (Number.isFinite(rate) && rate > 0) setNominalSampleRate(rate);
+        if (typeof message.simulated === "boolean") {
+          setSourceMode(message.simulated ? "simulation" : "live");
+        }
+        return;
+      }
+
+      if (message.type === "snapshot" && Array.isArray(message.channels)) {
+        setSnapshots(message.channels);
         return;
       }
 
@@ -317,19 +327,6 @@ export function useSignalEngine(
         return;
       }
 
-      if (message.type === "frame" && Array.isArray(message.channels)) {
-        const values = message.channels.slice(0, MAX_CHANNELS).map(Number);
-        values.forEach((value: number, index: number) => {
-          const history = fallbackHistory[index];
-          history.push(Number.isFinite(value) ? value : 0);
-          if (history.length > SNAPSHOT_SAMPLES) {
-            history.splice(0, history.length - SNAPSHOT_SAMPLES);
-          }
-        });
-
-        setSourceName(String(message.sourceName || "Fallback stream"));
-        setSourceMode(message.simulated ? "simulation" : "live");
-      }
     };
 
     const startWorkerWebSocket = () => {
@@ -479,8 +476,11 @@ export function useSignalEngine(
             Atomics.load(ring.control, CONTROL.CHANNELS),
           ),
         );
+        const versionBefore = Atomics.load(ring.control, 11);
+        if (versionBefore & 1) return;
         const writeIndex = Atomics.load(ring.control, CONTROL.WRITE_INDEX);
-        const totalFrames = Atomics.load(ring.control, CONTROL.TOTAL_FRAMES);
+        const totalFrames =
+          Atomics.load(ring.control, CONTROL.TOTAL_FRAMES) >>> 0;
         const count = Math.min(
           SNAPSHOT_SAMPLES,
           totalFrames,
@@ -498,7 +498,10 @@ export function useSignalEngine(
             }
             return values;
           });
-          setSnapshots(next);
+          const versionAfter = Atomics.load(ring.control, 11);
+          if (versionBefore === versionAfter && !(versionAfter & 1)) {
+            setSnapshots(next);
+          }
         }
 
         setPacketRate(
@@ -521,10 +524,8 @@ export function useSignalEngine(
         if (simulated) setSourceMode("simulation");
         else if (state === 2) setSourceMode("live");
       } else {
-        const next = fallbackHistory
-          .filter((history) => history.length)
-          .map((history) => history.slice());
-        if (next.length) setSnapshots(next);
+        // The ingest worker owns a bounded fallback ring when SharedArrayBuffer
+        // is unavailable. Only its low-rate snapshots cross into React.
       }
     }, 250);
 

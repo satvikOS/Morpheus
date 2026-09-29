@@ -607,7 +607,7 @@ def record_marker(marker: MarkerRequest) -> dict[str, Any]:
     use_mapped_event_time = (
         estimated is not None
         and uncertainty is not None
-        and uncertainty <= 20.0
+        and uncertainty <= 5.0
         and abs(estimated - arrival_time) <= 2.0
     )
 
@@ -632,6 +632,12 @@ def record_marker(marker: MarkerRequest) -> dict[str, Any]:
         "sync_uncertainty_ms": uncertainty,
         "clock_domain": clock_domain,
         "timestamp_method": timestamp_method,
+        "temporal_status": (
+            "software_clock_mapped"
+            if use_mapped_event_time
+            else "gateway_arrival_only"
+        ),
+        "hardware_trigger_verified": False,
         "payload": marker.payload or {},
     }
 
@@ -676,7 +682,7 @@ async def synthetic_stream(ws: WebSocket) -> None:
 
     while True:
         try:
-            base = time.time()
+            base, _ = gateway_clock()
             frames: list[list[float]] = []
             timestamps: list[float] = []
 
@@ -718,7 +724,7 @@ async def _synthetic_datachannel(channel: Any) -> None:
     stream_name = "Morpheus Synthetic Reference"
 
     while getattr(channel, "readyState", "") == "open":
-        base = time.time()
+        base, _ = gateway_clock()
         frames: list[list[float]] = []
         timestamps: list[float] = []
 

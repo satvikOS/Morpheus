@@ -77,7 +77,7 @@ export default function EvidenceBar({
     if (dropped >= 10) {
       return {
         level: "critical" as AlarmLevel,
-        message: `ACQUISITION DATA GAPS: ${dropped}`,
+        message: `DISPLAY LINK GAPS: ${dropped}`,
       };
     }
 
@@ -93,7 +93,7 @@ export default function EvidenceBar({
     if (dropped > 0) {
       return {
         level: "warning" as AlarmLevel,
-        message: `ACQUISITION DATA GAPS: ${dropped}`,
+        message: `DISPLAY LINK GAPS: ${dropped}`,
       };
     }
 
@@ -179,7 +179,7 @@ export default function EvidenceBar({
           />
           <EvidenceStat
             icon={ShieldCheck}
-            label="Dropped"
+            label="Display gaps"
             value={String(dropped)}
             state={dropped > 0 ? "warn" : "ok"}
           />

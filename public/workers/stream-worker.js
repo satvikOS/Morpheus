@@ -10,6 +10,7 @@ const CONTROL = {
   FRAME_RATE: 8,
   BYTE_RATE: 9,
   LAST_SEQUENCE: 10,
+  SNAPSHOT_VERSION: 11,
 };
 
 const MAGIC = [0x4d, 0x52, 0x50, 0x48];
@@ -21,12 +22,17 @@ let reconnectTimer = null;
 let closed = false;
 let data = null;
 let control = null;
+let fallbackData = null;
+let fallbackWriteIndex = 0;
+let fallbackTotalFrames = 0;
+let fallbackChannels = 0;
 let maxChannels = 32;
 let capacity = 32768;
 let packetsThisSecond = 0;
 let framesThisSecond = 0;
 let bytesThisSecond = 0;
 let packetRateTimer = null;
+let snapshotTimer = null;
 let syntheticTimer = null;
 let sourceName = "";
 let currentUrl = "";
@@ -50,12 +56,15 @@ self.onmessage = (event) => {
       data = new Float32Array(message.dataBuffer);
       control = new Int32Array(message.controlBuffer);
       control.fill(0);
+      fallbackData = null;
     } else {
       data = null;
       control = null;
+      fallbackData = new Float32Array(maxChannels * capacity);
     }
 
     startRateCounter();
+    startSnapshotCounter();
     return;
   }
 
@@ -144,13 +153,21 @@ function ingestPayload(payload, transport) {
     packetsThisSecond += 1;
     framesThisSecond += 1;
     sourceName = String(packet.stream || "Unknown stream");
+    const simulated = Boolean(packet.simulated);
     writeFrame(
       channels,
       Number(packet.ts || Date.now() / 1000),
-      Boolean(packet.simulated),
+      simulated,
     );
 
-    reportTransport(packet.simulated ? "simulation" : "online", transport);
+    self.postMessage({
+      type: "stream-metadata",
+      sourceName,
+      sampleRate: Number(packet.sample_rate || 0),
+      channelCount: channels.length,
+      simulated,
+    });
+    reportTransport(simulated ? "simulation" : "online", transport);
   } catch {
     incrementDropped();
   }
@@ -239,6 +256,7 @@ function ingestBinaryBatch(buffer, transport) {
     sourceName,
     sampleRate,
     channelCount,
+    simulated,
     protocol: "mrph-v1",
   });
 
@@ -249,6 +267,7 @@ function writeFrame(values, timestampSeconds, simulated) {
   const n = Math.min(maxChannels, values.length);
 
   if (control && data) {
+    Atomics.add(control, CONTROL.SNAPSHOT_VERSION, 1);
     const writeIndex = Atomics.load(control, CONTROL.WRITE_INDEX);
     const base = writeIndex * maxChannels;
 
@@ -266,6 +285,16 @@ function writeFrame(values, timestampSeconds, simulated) {
     );
     Atomics.add(control, CONTROL.TOTAL_FRAMES, 1);
     Atomics.store(control, CONTROL.WRITE_INDEX, (writeIndex + 1) % capacity);
+    Atomics.add(control, CONTROL.SNAPSHOT_VERSION, 1);
+  } else if (fallbackData) {
+    const base = fallbackWriteIndex * maxChannels;
+    for (let channel = 0; channel < maxChannels; channel += 1) {
+      const value = channel < n ? Number(values[channel]) : 0;
+      fallbackData[base + channel] = Number.isFinite(value) ? value : 0;
+    }
+    fallbackChannels = n;
+    fallbackTotalFrames += 1;
+    fallbackWriteIndex = (fallbackWriteIndex + 1) % capacity;
   } else {
     self.postMessage({
       type: "frame",
@@ -275,6 +304,25 @@ function writeFrame(values, timestampSeconds, simulated) {
       sourceName,
     });
   }
+}
+
+function startSnapshotCounter() {
+  clearInterval(snapshotTimer);
+  snapshotTimer = setInterval(() => {
+    if (!fallbackData || fallbackTotalFrames < 1) return;
+
+    const count = Math.min(1024, fallbackTotalFrames, capacity);
+    const start = (fallbackWriteIndex - count + capacity) % capacity;
+    const channels = Array.from({ length: fallbackChannels }, (_, channel) => {
+      const values = new Array(count);
+      for (let index = 0; index < count; index += 1) {
+        const frame = (start + index) % capacity;
+        values[index] = fallbackData[frame * maxChannels + channel];
+      }
+      return values;
+    });
+    self.postMessage({ type: "snapshot", channels });
+  }, 250);
 }
 
 function startRateCounter() {
@@ -392,6 +440,8 @@ function shutdown(permanent) {
 
   clearInterval(packetRateTimer);
   packetRateTimer = null;
+  clearInterval(snapshotTimer);
+  snapshotTimer = null;
 
   stopSynthetic();
 

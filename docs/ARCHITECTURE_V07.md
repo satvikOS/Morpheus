@@ -54,7 +54,9 @@ MRPH v1 header:
 
 Each frame contains one f64 timestamp followed by `channel_count` f32 values.
 
-Sequence gaps are counted by the browser ingestion Worker and are scoped to a stream ID, so changing sources does not appear as loss. Malformed packets and missing sequence numbers are both shown as acquisition data gaps. Packet rate and frame/sample rate are reported independently. The sample DataChannel is reliable and ordered; partially reliable delivery is not suitable for evidence acquisition because it silently discards packets under congestion.
+Sequence gaps are counted by the browser ingestion Worker and are scoped to a stream ID, so changing sources does not appear as loss. This is a **display-link** counter: it reports packets missing from or invalid on the browser path. The local LSL recorder and Rust recorder write before forwarding, so browser display gaps do not by themselves establish recording loss. Packet rate and frame/sample rate are reported independently. The sample DataChannel is reliable and ordered; partially reliable delivery is not suitable for evidence acquisition because it silently discards packets under congestion.
+
+When SharedArrayBuffer is unavailable, the ingest Worker owns a bounded local ring and sends 250 ms snapshots to the UI instead of copying every frame into the main thread. With SharedArrayBuffer, a sequence lock protects display snapshots; the WebGL2 renderer copies a consistent window before drawing. Both buffers are disposable display paths, not recording authorities.
 
 ## Native Rust core
 
@@ -80,7 +82,9 @@ The hosted Vercel service does not open this local UDP bridge.
 
 ## Recording
 
-The native gateway can write MRPH packet streams directly to local storage and finalizes a SHA-256 manifest when the process stops cleanly. The existing Python local recorder and JSONL-to-NWB conversion remain available during the migration.
+The native gateway can run headlessly, write MRPH packet streams directly to local storage, and finalize a SHA-256 manifest when the process stops cleanly. The current built-in native source is a synthetic engineering generator. Real amplifier drivers and verified ADC trigger paths are not included. The Python local recorder and JSONL-to-NWB conversion remain available during the migration.
+
+Synthetic Python samples now use the same gateway clock domain as software markers. Marker records distinguish a software clock estimate from gateway-arrival timing and mark hardware-trigger verification as false. Software clock mapping is accepted for marker placement only when estimated uncertainty is at most 5 ms. It does not establish hardware-level ERP timing; verified amplifier and trigger integration is still required.
 
 A digest establishes integrity. It does not by itself establish authorship or regulatory-grade chain of custody.
 
@@ -102,7 +106,7 @@ Public NeuroVault NIfTI presets and local NIfTI files are first-class sources. A
 
 - M0: immutable local dream corpus and SHA-256 sealing
 - M1: recurrence scoring plus deterministic non-match null comparisons
-- M2: pre-registered delay conditions, trial registry, synchronized markers, blinded score and delay-response summary
+- M2: pre-registered delay conditions, trial registry, clock-provenanced software markers, blinded score and delay-response summary
 - M3: leave-one-session-out nearest-centroid baseline plus permutation null
 - M4: native MRPH core, batched ingestion, LSL/BrainFlow adapters, local recording and timing provenance
 - M5: subject/session feature snapshots, state centroids and cross-state similarity

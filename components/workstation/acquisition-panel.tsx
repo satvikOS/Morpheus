@@ -116,7 +116,7 @@ export default function AcquisitionPanel({
             label="REST RTT"
             value={latency === null ? "—" : `${latency} ms`}
           />
-          <Metric label="Data gaps" value={dropped} detail="missing packets + invalid frames" />
+          <Metric label="Display gaps" value={dropped} detail="browser-link sequence gaps + invalid frames" />
           <Metric
             label="Memory path"
             value={sharedMemory ? "SAB" : "FALLBACK"}

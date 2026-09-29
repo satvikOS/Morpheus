@@ -57,6 +57,8 @@ export type MarkerEvent = {
   clock_domain?: string;
   wall_timestamp?: number;
   timestamp_method?: string;
+  temporal_status?: "software_clock_mapped" | "gateway_arrival_only";
+  hardware_trigger_verified?: boolean;
   sync_uncertainty_ms?: number | null;
   transport?: string;
 };

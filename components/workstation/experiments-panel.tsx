@@ -158,6 +158,8 @@ export default function ExperimentsPanel({
         clock_domain:
           marker?.clock_domain || "browser_untrusted",
         timestamp_method: marker?.timestamp_method,
+        temporal_status: marker?.temporal_status,
+        hardware_trigger_verified: marker?.hardware_trigger_verified,
         sync_uncertainty_ms:
           marker?.sync_uncertainty_ms,
         transport: result.transport,
@@ -795,6 +797,10 @@ export default function ExperimentsPanel({
                     {" · "}
                     {event.timestamp_method ||
                       "unknown method"}
+                    {" · "}
+                    {event.temporal_status === "software_clock_mapped"
+                      ? "software clock mapped; hardware trigger unverified"
+                      : "arrival time only; not time-lock verified"}
                     {event.sync_uncertainty_ms != null
                       ? " · ±" +
                         event.sync_uncertainty_ms.toFixed(

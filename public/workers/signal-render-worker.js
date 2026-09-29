@@ -6,6 +6,8 @@ let positionLocation = -1;
 let alphaLocation = null;
 let data = null;
 let control = null;
+let renderData = new Float32Array(0);
+let renderFrameCount = 0;
 let capacity = 0;
 let maxChannels = 0;
 let fallbackChannels = [];
@@ -24,6 +26,7 @@ const CONTROL = {
   SIMULATED: 5,
   DROPPED: 6,
   LAST_TS_MS: 7,
+  SNAPSHOT_VERSION: 11,
 };
 
 const settings = {
@@ -203,25 +206,57 @@ function render() {
   if (!gl || !program || !buffer) return;
 
   resizeCanvas();
-  gl.clearColor(0.012, 0.025, 0.035, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
+  let channelCount = fallbackChannels.length;
+  let availableFrames = Math.max(0, fallbackChannels[0]?.length || 0);
+  let writeIndex = availableFrames;
 
-  const channelCount = control
-    ? Math.max(0, Math.min(maxChannels, Atomics.load(control, CONTROL.CHANNELS)))
-    : fallbackChannels.length;
+  if (control && data) {
+    let stable = false;
+    for (let attempt = 0; attempt < 3 && !stable; attempt += 1) {
+      const before = Atomics.load(control, CONTROL.SNAPSHOT_VERSION);
+      if (before & 1) continue;
 
-  const availableFrames = control
-    ? Math.max(0, Math.min(capacity, Atomics.load(control, CONTROL.TOTAL_FRAMES)))
-    : Math.max(0, fallbackChannels[0]?.length || 0);
+      channelCount = Math.max(
+        0,
+        Math.min(maxChannels, Atomics.load(control, CONTROL.CHANNELS)),
+      );
+      const totalFrames = Atomics.load(control, CONTROL.TOTAL_FRAMES) >>> 0;
+      availableFrames = Math.min(capacity, totalFrames);
+      writeIndex = Atomics.load(control, CONTROL.WRITE_INDEX);
+      const sampleRate = Math.max(1, Number(settings.sampleRate || 256));
+      const desiredFrames = Math.max(
+        2,
+        Math.round(sampleRate * Number(settings.timeWindow || 10)),
+      );
+      renderFrameCount = Math.min(availableFrames, desiredFrames);
+      ensureRenderData(renderFrameCount * maxChannels);
+
+      const start = (writeIndex - renderFrameCount + capacity) % capacity;
+      for (let frameIndex = 0; frameIndex < renderFrameCount; frameIndex += 1) {
+        const frame = (start + frameIndex) % capacity;
+        for (let channel = 0; channel < channelCount; channel += 1) {
+          renderData[frameIndex * maxChannels + channel] =
+            data[frame * maxChannels + channel];
+        }
+      }
+
+      const after = Atomics.load(control, CONTROL.SNAPSHOT_VERSION);
+      stable = before === after && !(after & 1);
+    }
+
+    if (!stable) return;
+    availableFrames = renderFrameCount;
+    writeIndex = renderFrameCount;
+  }
 
   if (!channelCount || availableFrames < 2) return;
 
   const sampleRate = Math.max(1, Number(settings.sampleRate || 256));
   const desiredFrames = Math.max(2, Math.round(sampleRate * Number(settings.timeWindow || 10)));
   const sampleCount = Math.min(availableFrames, desiredFrames);
-  const writeIndex = control
-    ? Atomics.load(control, CONTROL.WRITE_INDEX)
-    : availableFrames;
+
+  gl.clearColor(0.012, 0.025, 0.035, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
 
   const laneHeight = 2 / channelCount;
   const physicalScale =
@@ -266,14 +301,13 @@ function readValue(channel, logicalIndex, channelCount, sampleCount, writeIndex)
   let value = 0;
 
   if (control && data) {
-    const start = (writeIndex - sampleCount + capacity) % capacity;
-    const frame = (start + logicalIndex) % capacity;
-    value = data[frame * maxChannels + channel] || 0;
+    const frame = logicalIndex;
+    value = renderData[frame * maxChannels + channel] || 0;
 
     if (settings.montage === "average") {
       let sum = 0;
       for (let c = 0; c < channelCount; c += 1) {
-        sum += data[frame * maxChannels + c] || 0;
+        sum += renderData[frame * maxChannels + c] || 0;
       }
       value -= sum / channelCount;
     }
@@ -297,6 +331,13 @@ function readValue(channel, logicalIndex, channelCount, sampleCount, writeIndex)
   }
 
   return Number.isFinite(value) ? value : 0;
+}
+
+function ensureRenderData(required) {
+  if (renderData.length >= required) return;
+  let size = Math.max(1024, renderData.length);
+  while (size < required) size *= 2;
+  renderData = new Float32Array(size);
 }
 
 function normalizedY(value, scale, laneCenter, laneHeight, polarity, physicalScale) {

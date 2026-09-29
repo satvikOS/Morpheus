@@ -39,6 +39,7 @@ function loadWorker() {
   return {
     messages,
     tickMetrics: () => intervals[0](),
+    tickSnapshot: () => intervals[1](),
     send: (payload) => self.onmessage({ data: { type: "webrtc-packet", payload } }),
   };
 }
@@ -66,9 +67,15 @@ test("counts missing sequences, resets the baseline for a new stream, and counts
   worker.send(packet(0, 202)); // A new source has its own sequence space.
   worker.send(new ArrayBuffer(36)); // Invalid magic / payload.
   worker.tickMetrics();
+  worker.tickSnapshot();
 
   const metrics = worker.messages.find((message) => message.type === "metrics");
+  const snapshot = worker.messages.find((message) => message.type === "snapshot");
   assert.equal(metrics.dropped, 2);
   assert.equal(metrics.frameRate, 3);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(snapshot.channels)),
+    [[0.25, 0.25, 0.25]],
+  );
+  assert.equal(worker.messages.some((message) => message.type === "frame"), false);
 });
-

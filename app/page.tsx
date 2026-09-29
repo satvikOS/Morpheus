@@ -229,7 +229,7 @@ export default function Home() {
                 </div>
                 <div>
                   <strong>{signal.dropped}</strong>
-                  <span>dropped</span>
+                  <span>display gaps</span>
                 </div>
                 <div>
                   <strong>{signal.sharedMemory ? "SAB" : "COPY"}</strong>

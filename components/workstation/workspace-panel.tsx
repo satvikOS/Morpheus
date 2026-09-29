@@ -226,7 +226,7 @@ export default function WorkspacePanel({
             }
           />
           <HealthCell
-            label="Dropped"
+            label="Display gaps"
             value={String(dropped)}
             good={dropped === 0}
           />
