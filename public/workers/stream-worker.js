@@ -90,6 +90,10 @@ function connectWebSocket() {
   if (closed || !currentUrl || socket) return;
 
   try {
+    // Gateway sequence counters are scoped to a connection. A reconnect is a
+    // new delivery window, so the offline interval is not counted as loss.
+    expectedSequence = null;
+    expectedStreamId = null;
     socket = new WebSocket(currentUrl);
     socket.binaryType = "arraybuffer";
     setState(1);

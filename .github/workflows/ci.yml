@@ -55,8 +55,10 @@ jobs:
       - name: Compile gateway and recording tools
         run: |
           python -m py_compile services/signal-gateway/app/main.py
+          python -m py_compile services/signal-gateway/app/protocol.py
           python -m py_compile services/signal-gateway/tools/jsonl_to_nwb.py
           python -m py_compile services/signal-gateway/tools/mrph_to_nwb.py
+          python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Validate JSON schemas
         run: |

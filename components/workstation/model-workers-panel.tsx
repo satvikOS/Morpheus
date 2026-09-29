@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   BrainCircuit,
@@ -66,11 +66,15 @@ const engines = [
 export default function ModelWorkersPanel({
   samples,
   channelSamples,
+  sampleRate,
 }: {
   samples: number[];
   channelSamples: number[][];
+  sampleRate: number;
 }) {
   const worker = useRef<SignalWorkerClient | null>(null);
+  const latestInput = useRef({ samples, channelSamples, sampleRate });
+  const analysisInFlight = useRef(false);
   const [analysis, setAnalysis] = useState<SignalAnalysis | null>(null);
   const [channelAnalysis, setChannelAnalysis] = useState<SignalAnalysis[]>([]);
   const [latency, setLatency] = useState<number | null>(null);
@@ -83,31 +87,41 @@ export default function ModelWorkersPanel({
     return () => worker.current?.stop();
   }, []);
 
-  const analyze = async () => {
-    const source = channelSamples.length ? channelSamples : samples.length ? [samples] : [];
-    if (!source.length || running) return;
+  latestInput.current = { samples, channelSamples, sampleRate };
 
+  const analyze = useCallback(async () => {
+    const input = latestInput.current;
+    const source = input.channelSamples.length
+      ? input.channelSamples
+      : input.samples.length
+        ? [input.samples]
+        : [];
+    if (!source.length || analysisInFlight.current) return;
+
+    analysisInFlight.current = true;
     setRunning(true);
     try {
-      const result = await worker.current?.analyzeChannels(source, 256);
+      const result = await worker.current?.analyzeChannels(
+        source,
+        Math.max(1, input.sampleRate || 256),
+      );
       if (result) {
         setAnalysis(result.metrics);
         setChannelAnalysis(result.channels);
         setLatency(result.latencyMs);
       }
     } finally {
+      analysisInFlight.current = false;
       setRunning(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    const available =
-      channelSamples.some((channel) => channel.length >= 32) || samples.length >= 32;
-    if (!auto || !available) return;
+    if (!auto) return;
 
     const timer = window.setInterval(() => void analyze(), 1400);
     return () => window.clearInterval(timer);
-  }, [auto, channelSamples, samples]);
+  }, [auto, analyze]);
 
   const dominant = useMemo(() => {
     if (!analysis) return "—";
@@ -140,7 +154,10 @@ export default function ModelWorkersPanel({
         />
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-6">
           <Metric label="Preview backend" value="Web Worker" detail="main-thread isolated" />
-          <Metric label="Channels" value={channelAnalysis.length || channelSamples.length || 1} />
+          <Metric
+            label="Channels"
+            value={channelAnalysis.length || channelSamples.length || (samples.length ? 1 : 0)}
+          />
           <Metric
             label="Analysis latency"
             value={latency === null ? "—" : `${latency.toFixed(1)} ms`}
@@ -199,17 +216,17 @@ export default function ModelWorkersPanel({
           />
           <div className="space-y-3 p-4">
             {["delta", "theta", "alpha", "beta", "gamma"].map((band) => {
-              const value = analysis?.bands?.[band] ?? 0;
+              const value = analysis?.bands?.[band];
               return (
                 <div key={band}>
                   <div className="mb-1.5 flex justify-between text-[10px] uppercase tracking-[.13em] text-slate-600">
                     <span>{band}</span>
-                    <span>{(value * 100).toFixed(1)}%</span>
+                    <span>{value === undefined ? "—" : `${(value * 100).toFixed(1)}%`}</span>
                   </div>
                   <div className="h-1.5 overflow-hidden rounded-full bg-white/[.04]">
                     <div
                       className="h-full rounded-full bg-sky-300/55"
-                      style={{ width: `${Math.max(1, value * 100)}%` }}
+                      style={{ width: `${Math.max(0, (value || 0) * 100)}%` }}
                     />
                   </div>
                 </div>

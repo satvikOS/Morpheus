@@ -18,6 +18,13 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from app.protocol import (
+    MRPH_FLAG_SIMULATED,
+    MRPH_HEADER,
+    MRPH_MAGIC,
+    MRPH_VERSION,
+    encode_sample_batch,
+)
 
 try:
     from pylsl import (
@@ -60,69 +67,12 @@ _marker_outlet: Any = None
 WEBRTC_PEERS: set[Any] = set()
 WEBRTC_TASKS: set[asyncio.Task[Any]] = set()
 MARKER_SEQUENCE = 0
-STREAM_SEQUENCES: dict[str, int] = {}
 NATIVE_SUBSCRIBERS: set[asyncio.Queue[bytes]] = set()
 NATIVE_LAST_META: dict[str, Any] = {}
 NATIVE_TRANSPORT: Any = None
-MRPH_MAGIC = b"MRPH"
-MRPH_VERSION = 1
-MRPH_FLAG_SIMULATED = 1
-MRPH_HEADER = struct.Struct("<4sHHIIfHH")
 GATEWAY_INSTANCE_ID = str(uuid.uuid4())
 HOSTED_RUNTIME = os.environ.get("VERCEL") == "1"
 CLOCK_STABLE_FOR_MARKERS = not HOSTED_RUNTIME
-
-
-def _stream_hash(value: str) -> int:
-    current = 2166136261
-    for byte in value.encode("utf-8", errors="replace"):
-        current ^= byte
-        current = (current * 16777619) & 0xFFFFFFFF
-    return current
-
-
-def _next_stream_sequence(stream: str) -> int:
-    value = STREAM_SEQUENCES.get(stream, 0)
-    STREAM_SEQUENCES[stream] = (value + 1) & 0xFFFFFFFF
-    return value
-
-
-def encode_sample_batch(
-    stream: str,
-    sample_rate: float,
-    samples: list[list[float]],
-    timestamps: list[float],
-    simulated: bool,
-) -> bytes:
-    if not samples or len(samples) != len(timestamps):
-        raise ValueError("Sample batch must include matching frames and timestamps.")
-
-    channel_count = len(samples[0])
-    if channel_count < 1 or channel_count > 65535:
-        raise ValueError("Unsupported channel count.")
-
-    for frame in samples:
-        if len(frame) != channel_count:
-            raise ValueError("All sample frames must have the same channel count.")
-
-    frame_count = len(samples)
-    flags = MRPH_FLAG_SIMULATED if simulated else 0
-    header = MRPH_HEADER.pack(
-        MRPH_MAGIC,
-        MRPH_VERSION,
-        flags,
-        _next_stream_sequence(stream),
-        _stream_hash(stream),
-        float(sample_rate or 0.0),
-        channel_count,
-        frame_count,
-    )
-
-    payload = bytearray(header)
-    for timestamp, frame in zip(timestamps, samples, strict=True):
-        payload.extend(struct.pack("<d", float(timestamp)))
-        payload.extend(struct.pack(f"<{channel_count}f", *[float(value) for value in frame]))
-    return bytes(payload)
 
 
 def _record_batch(
@@ -679,6 +629,7 @@ async def synthetic_stream(ws: WebSocket) -> None:
     phase = 0.0
     sample_rate = 256.0
     batch_size = 8
+    sequence = 0
 
     while True:
         try:
@@ -710,8 +661,10 @@ async def synthetic_stream(ws: WebSocket) -> None:
                     frames,
                     timestamps,
                     True,
+                    sequence,
                 )
             )
+            sequence = (sequence + 1) & 0xFFFFFFFF
             await asyncio.sleep(batch_size / sample_rate)
         except WebSocketDisconnect:
             return
@@ -722,6 +675,7 @@ async def _synthetic_datachannel(channel: Any) -> None:
     sample_rate = 256.0
     batch_size = 8
     stream_name = "Morpheus Synthetic Reference"
+    sequence = 0
 
     while getattr(channel, "readyState", "") == "open":
         base, _ = gateway_clock()
@@ -752,8 +706,10 @@ async def _synthetic_datachannel(channel: Any) -> None:
                 frames,
                 timestamps,
                 True,
+                sequence,
             )
         )
+        sequence = (sequence + 1) & 0xFFFFFFFF
         await asyncio.sleep(batch_size / sample_rate)
 
 
@@ -817,6 +773,7 @@ async def _lsl_datachannel(channel: Any, source_id: str | None) -> None:
     stream_name = selected.name()
     sample_rate = float(selected.nominal_srate() or 0.0)
     batch_max = max(1, min(64, int(sample_rate / 30) if sample_rate > 0 else 16))
+    sequence = 0
 
     while getattr(channel, "readyState", "") == "open":
         try:
@@ -839,8 +796,10 @@ async def _lsl_datachannel(channel: Any, source_id: str | None) -> None:
                     frames,
                     times,
                     False,
+                    sequence,
                 )
             )
+            sequence = (sequence + 1) & 0xFFFFFFFF
         except Exception:
             await asyncio.sleep(0.01)
 
@@ -855,6 +814,7 @@ async def _lsl_websocket(ws: WebSocket, selected: Any) -> None:
     stream_name = selected.name()
     sample_rate = float(selected.nominal_srate() or 0.0)
     batch_max = max(1, min(64, int(sample_rate / 30) if sample_rate > 0 else 16))
+    sequence = 0
 
     while True:
         try:
@@ -877,8 +837,10 @@ async def _lsl_websocket(ws: WebSocket, selected: Any) -> None:
                     frames,
                     times,
                     False,
+                    sequence,
                 )
             )
+            sequence = (sequence + 1) & 0xFFFFFFFF
         except WebSocketDisconnect:
             return
         except Exception:

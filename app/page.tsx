@@ -380,6 +380,7 @@ export default function Home() {
               <ModelWorkersPanel
                 samples={samples}
                 channelSamples={channelSamples}
+                sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
               />
             ) : null}
             {view === "simulation" ? <SimulationPanel /> : null}
