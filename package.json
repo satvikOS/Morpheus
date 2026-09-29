@@ -9,6 +9,7 @@
     "dev": "next dev",
     "build": "next build",
     "typecheck": "tsc --noEmit",
+    "test:worker": "node --test tests/*.test.cjs",
     "check": "npm run typecheck && npm run build",
     "start": "next start"
   },

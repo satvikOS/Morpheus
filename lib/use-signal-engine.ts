@@ -351,8 +351,11 @@ export function useSignalEngine(
         peer = new RTCPeerConnection({ iceServers: [] });
 
         sampleChannel = peer.createDataChannel("morpheus-samples", {
-          ordered: false,
-          maxRetransmits: 0,
+          // Acquisition samples are evidence. A partially reliable channel
+          // silently discards them under congestion and turns ordinary load
+          // into sequence gaps. Preserve ordering and delivery; the renderer
+          // still consumes only a bounded, recent display window.
+          ordered: true,
         });
         controlChannel = peer.createDataChannel("morpheus-control", {
           ordered: true,

@@ -77,7 +77,7 @@ export default function EvidenceBar({
     if (dropped >= 10) {
       return {
         level: "critical" as AlarmLevel,
-        message: `PACKET / DECODE ERRORS: ${dropped}`,
+        message: `ACQUISITION DATA GAPS: ${dropped}`,
       };
     }
 
@@ -93,7 +93,7 @@ export default function EvidenceBar({
     if (dropped > 0) {
       return {
         level: "warning" as AlarmLevel,
-        message: `DROPPED / INVALID PACKETS: ${dropped}`,
+        message: `ACQUISITION DATA GAPS: ${dropped}`,
       };
     }
 

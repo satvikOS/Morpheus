@@ -20,7 +20,7 @@ DAQ / LSL / BrainFlow / native source
                  |
                  +--> optional UDP handoff to local adapter
                  |        |
-                 |        +--> WebRTC unordered sample DataChannel
+                 |        +--> WebRTC reliable ordered sample DataChannel
                  |        +--> binary WebSocket fallback
                  |
                  v
@@ -54,7 +54,7 @@ MRPH v1 header:
 
 Each frame contains one f64 timestamp followed by `channel_count` f32 values.
 
-Sequence gaps are counted by the browser ingestion Worker. Packet rate and frame/sample rate are reported independently.
+Sequence gaps are counted by the browser ingestion Worker and are scoped to a stream ID, so changing sources does not appear as loss. Malformed packets and missing sequence numbers are both shown as acquisition data gaps. Packet rate and frame/sample rate are reported independently. The sample DataChannel is reliable and ordered; partially reliable delivery is not suitable for evidence acquisition because it silently discards packets under congestion.
 
 ## Native Rust core
 

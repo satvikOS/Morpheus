@@ -33,6 +33,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Stream worker regression test
+        run: npm run test:worker
+
       - name: Production build
         run: npm run build
 

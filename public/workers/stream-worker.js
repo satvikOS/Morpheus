@@ -33,7 +33,9 @@ let currentUrl = "";
 let websocketFallbackEnabled = false;
 let lastTransportKey = "";
 let expectedSequence = null;
+let expectedStreamId = null;
 let fallbackSequence = 0;
+let droppedCount = 0;
 
 self.onmessage = (event) => {
   const message = event.data || {};
@@ -175,14 +177,27 @@ function ingestBinaryBatch(buffer, transport) {
   const channelCount = view.getUint16(20, true);
   const frameCount = view.getUint16(22, true);
 
-  if (version !== 1 || channelCount < 1 || frameCount < 1) {
+  if (
+    version !== 1 ||
+    channelCount < 1 ||
+    frameCount < 1 ||
+    !Number.isFinite(sampleRate) ||
+    sampleRate < 0
+  ) {
     throw new Error("Unsupported Morpheus packet");
   }
 
   const stride = 8 + channelCount * 4;
   const expectedBytes = HEADER_BYTES + stride * frameCount;
-  if (expectedBytes > buffer.byteLength) {
-    throw new Error("Truncated Morpheus packet");
+  if (expectedBytes !== buffer.byteLength) {
+    throw new Error("Invalid Morpheus packet length");
+  }
+
+  // Sequence numbers are scoped to a source stream. Switching sources must
+  // not be reported as loss from the previous source.
+  if (expectedStreamId !== streamId) {
+    expectedStreamId = streamId;
+    expectedSequence = null;
   }
 
   if (expectedSequence !== null && sequence !== expectedSequence) {
@@ -289,7 +304,7 @@ function startRateCounter() {
       simulated: control
         ? Atomics.load(control, CONTROL.SIMULATED) === 1
         : false,
-      dropped: control ? Atomics.load(control, CONTROL.DROPPED) : 0,
+      dropped: droppedCount,
     });
   }, 1000);
 }
@@ -351,6 +366,7 @@ function incrementDropped() {
 }
 
 function addDropped(count) {
+  droppedCount += count;
   if (control) Atomics.add(control, CONTROL.DROPPED, count);
 }
 
@@ -369,6 +385,7 @@ function shutdown(permanent) {
   closed = permanent;
   websocketFallbackEnabled = false;
   expectedSequence = null;
+  expectedStreamId = null;
 
   clearTimeout(reconnectTimer);
   reconnectTimer = null;

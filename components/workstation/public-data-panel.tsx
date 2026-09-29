@@ -167,7 +167,7 @@ export default function PublicDataPanel() {
 
     const timer = window.setInterval(() => {
       void search(query, true);
-    }, 15000);
+    }, 5 * 60 * 1000);
 
     return () => window.clearInterval(timer);
   }, [live, query, search]);
@@ -282,7 +282,7 @@ export default function PublicDataPanel() {
                 : "—"}
             </span>
             <span>
-              Poll cadence: {live ? "15 s" : "paused"} · IndexedDB retained
+              Poll cadence: {live ? "5 min" : "paused"} · IndexedDB retained
             </span>
           </div>
         </div>
