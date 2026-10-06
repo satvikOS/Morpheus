@@ -83,7 +83,7 @@ The final project defines **three services**: Next.js frontend, Python public ga
 | Node research/volume/worker/graph suite | **40 passed**, no failures/skips, `tmp/final-node-tests.log` |
 | Node 24 production build / type checks | **Passed**, Next.js 15.5.27, `tmp/final-web-build.log` |
 | C++ parity / integration / public HTTP | **Passed locally** within the measured limitations above |
-| Remote CI IDs and completed job results | **PENDING — insert verified run URLs/results** |
+| Remote CI IDs and completed job results | **Passed:** [Morpheus CI run 37445111184](https://github.com/satvikOS/Morpheus/actions/runs/37445111184) — Web workstation, signal-gateway syntax, Rust native, shared representation and C++ acquisition/cloud checks all passed; Vercel deployment check also passed |
 | Preview deployment / three-service health checks | **Passed:** `dpl_CDkr7WpDLnc9VaxAXQtQJs248iUv`, preview URL and authenticated health receipts in [VERCEL.md](VERCEL.md); frontend, signal-gateway and cloud C++ routes responded successfully |
 | Production deployment / three-service health checks | **Passed:** `dpl_8k4fg4WF4zdSJXBsX6FoTF7k9574`, alias [morpheus-three.vercel.app](https://morpheus-three.vercel.app), frontend/signal-gateway/cloud C++ health all returned successfully; file-tree privacy audit is recorded in [VERCEL.md](VERCEL.md) |
 | Fresh production navigation / graph labels | **Passed:** 36 actual clicks, 14 visible labels, zero page errors; receipt above |
