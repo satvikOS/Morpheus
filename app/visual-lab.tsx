@@ -35,12 +35,21 @@ import {
   useState,
 } from "react";
 import { generateVolumePhantom } from "@/lib/simulations";
+import { readNiftiScalars, spatialAffine, voxelToWorld, type VoxelPoint } from "@/lib/neuro-volume";
 
 type Mode = "volume" | "atlas" | "network";
 
 type NiftiHeader = {
   dims: number[];
   datatypeCode: number;
+  littleEndian: boolean;
+  scl_slope: number;
+  scl_inter: number;
+  affine: number[][];
+  xyzt_units: number;
+  sform_code: number;
+  qform_code: number;
+  getQformMat: () => number[][];
 };
 
 type NiftiReaderApi = {
@@ -66,6 +75,10 @@ type VolumeData = {
   voxels: Uint8Array;
   source: "synthetic" | "nifti" | "public";
   referenceUrl?: string;
+  rawValues?: Float64Array;
+  affine?: number[][];
+  spatialUnits?: string;
+  frames?: number;
 };
 
 const niftiReader = niftiModule as unknown as NiftiReaderApi;
@@ -534,9 +547,10 @@ export default function VisualLab({
       referenceUrl?: string,
     ) => {
       let buffer = incoming;
+      if (incoming.byteLength > 64 * 1024 * 1024) throw new Error("Import exceeds the 64 MiB browser preview budget; use a local science adapter for larger volumes.");
 
       if (niftiReader.isCompressed(buffer)) {
-        buffer = niftiReader.decompress(buffer);
+        buffer = await decompressBounded(buffer);
       }
 
       if (!niftiReader.isNIFTI(buffer)) {
@@ -544,7 +558,6 @@ export default function VisualLab({
       }
 
       const header = niftiReader.readHeader(buffer);
-      const image = niftiReader.readImage(header, buffer);
       const dims: [number, number, number] = [
         Number(header.dims[1]),
         Number(header.dims[2]),
@@ -558,14 +571,22 @@ export default function VisualLab({
         throw new Error("NIfTI dimensions are outside the supported workstation envelope.");
       }
 
-      const values = typedVolume(image, header.datatypeCode);
+      const frames = Math.max(1, Number(header.dims[4]) || 1);
+      if ((Number(header.dims[5]) || 1) > 1 || (Number(header.dims[6]) || 1) > 1 || (Number(header.dims[7]) || 1) > 1) throw new Error("Vector/tensor NIfTI data require a dedicated derivative viewer.");
       const voxelCount = dims[0] * dims[1] * dims[2];
+      if (!Number.isSafeInteger(voxelCount * frames) || voxelCount * frames > 16_777_216) throw new Error("NIfTI exceeds the 16 million scalar browser preview budget; use a local science adapter.");
+      const image = niftiReader.readImage(header, buffer);
+      const values = readNiftiScalars(image, header.datatypeCode, header.littleEndian, voxelCount * frames, header.scl_slope, header.scl_inter);
       const normalized = normalizeVolume(values, voxelCount);
 
       setVolume({
         name,
         dims,
         voxels: normalized,
+        rawValues: values,
+        affine: spatialAffine(header),
+        spatialUnits: ({ 1: "m", 2: "mm", 3: "µm" } as Record<number, string>)[header.xyzt_units & 7] ?? "unknown units",
+        frames,
         source,
         referenceUrl,
       });
@@ -728,7 +749,7 @@ export default function VisualLab({
           {[
             { id: "volume" as const, label: "Brain volume", icon: Layers3 },
             { id: "atlas" as const, label: "Voxel field", icon: Waypoints },
-            { id: "network" as const, label: "Region topology", icon: Braces },
+            { id: "network" as const, label: "Intensity-bin geometry", icon: Braces },
           ].map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -916,7 +937,7 @@ export default function VisualLab({
                   : "Engineering phantom"
               : mode === "atlas"
                 ? "Volume-derived voxel field"
-                : "Volume-derived region topology"}
+                : "Intensity bins with proximity edges; no connectivity measurement"}
           </strong>
         </div>
 
@@ -928,25 +949,14 @@ export default function VisualLab({
         ) : null}
 
         {mode === "volume" && !compact ? (
-          <div className="absolute right-4 top-4 z-10 hidden grid-cols-3 gap-2 2xl:grid">
-            <SliceCanvas
-              volume={volume}
-              orientation="axial"
-              index={slice[2]}
-              onIndex={(value) => setSlice(([x, y]) => [x, y, value])}
-            />
-            <SliceCanvas
-              volume={volume}
-              orientation="coronal"
-              index={slice[1]}
-              onIndex={(value) => setSlice(([x, , z]) => [x, value, z])}
-            />
-            <SliceCanvas
-              volume={volume}
-              orientation="sagittal"
-              index={slice[0]}
-              onIndex={(value) => setSlice(([, y, z]) => [value, y, z])}
-            />
+          <div className="linked-slices absolute left-4 right-4 top-20 z-10">
+            {(["axial", "coronal", "sagittal"] as const).map((orientation) => <SliceCanvas key={orientation} volume={volume} orientation={orientation} point={slice} onPoint={setSlice} />)}
+            <div className="volume-coordinates">
+              <span>Voxel I/J/K: {slice.join(" / ")}</span>
+              <span>{voxelToWorld(slice, volume.affine) ? `Header world: ${voxelToWorld(slice, volume.affine)!.map((value) => value.toFixed(2)).join(" / ")} ${volume.spatialUnits}` : "World registration unavailable"}</span>
+              <span>Intensity: {volume.rawValues?.[slice[0] + slice[1] * volume.dims[0] + slice[2] * volume.dims[0] * volume.dims[1]]?.toPrecision(5) ?? "normalized phantom"}</span>
+              <span>Voxel-space preview; oblique anatomy and physical aspect are not registered. {(volume.frames ?? 1) > 1 ? `Frame 1 of ${volume.frames} (temporal playback pending).` : ""}</span>
+            </div>
           </div>
         ) : null}
 
@@ -1017,112 +1027,50 @@ function VolumeSlider({
   );
 }
 
-function SliceCanvas({
-  volume,
-  orientation,
-  index,
-  onIndex,
-}: {
-  volume: VolumeData;
-  orientation: "axial" | "coronal" | "sagittal";
-  index: number;
-  onIndex: (value: number) => void;
+function SliceCanvas({ volume, orientation, point, onPoint }: {
+  volume: VolumeData; orientation: "axial" | "coronal" | "sagittal"; point: VoxelPoint; onPoint: (point: VoxelPoint) => void;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const [x, y, z] = volume.dims;
-  const maxIndex =
-    orientation === "axial"
-      ? z - 1
-      : orientation === "coronal"
-        ? y - 1
-        : x - 1;
-
+  const axis = orientation === "axial" ? 2 : orientation === "coronal" ? 1 : 0;
+  const index = point[axis];
+  const maxIndex = volume.dims[axis] - 1;
+  const width = orientation === "sagittal" ? z : x;
+  const height = orientation === "coronal" ? z : y;
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    const width = orientation === "sagittal" ? z : x;
-    const height =
-      orientation === "axial"
-        ? y
-        : orientation === "coronal"
-          ? z
-          : y;
-
-    canvas.width = width;
-    canvas.height = height;
+    canvas.width = width; canvas.height = height;
     const image = ctx.createImageData(width, height);
-
-    for (let py = 0; py < height; py += 1) {
-      for (let px = 0; px < width; px += 1) {
-        let vx = px;
-        let vy = py;
-        let vz = index;
-
-        if (orientation === "coronal") {
-          vx = px;
-          vy = index;
-          vz = py;
-        } else if (orientation === "sagittal") {
-          vx = index;
-          vy = py;
-          vz = px;
-        }
-
-        const sourceIndex = vx + vy * x + vz * x * y;
-        const value = volume.voxels[sourceIndex] ?? 0;
-        const offset = (px + (height - 1 - py) * width) * 4;
-        image.data[offset] = value;
-        image.data[offset + 1] = value;
-        image.data[offset + 2] = value;
-        image.data[offset + 3] = 255;
-      }
+    for (let py = 0; py < height; py++) for (let px = 0; px < width; px++) {
+      const [vx, vy, vz] = orientation === "coronal" ? [px, index, py] : orientation === "sagittal" ? [index, py, px] : [px, py, index];
+      const value = volume.voxels[vx + vy * x + vz * x * y] ?? 0;
+      const offset = (px + (height - 1 - py) * width) * 4;
+      image.data[offset] = image.data[offset + 1] = image.data[offset + 2] = value;
+      image.data[offset + 3] = 255;
     }
-
     ctx.putImageData(image, 0, 0);
-  }, [volume, orientation, index, x, y, z]);
-
-  return (
-    <div className="w-36 rounded-lg border border-white/[.08] bg-black/75 p-2 backdrop-blur">
-      <div className="mb-1.5 flex items-center justify-between text-[9px] uppercase tracking-[.1em] text-slate-500">
-        <span>{orientation}</span>
-        <span>{index}/{maxIndex}</span>
-      </div>
-      <canvas
-        ref={ref}
-        className="aspect-square w-full rounded bg-black object-contain"
-      />
-      <input
-        className="mt-2 w-full accent-slate-300"
-        type="range"
-        min={0}
-        max={maxIndex}
-        value={Math.min(index, maxIndex)}
-        onChange={(event) => onIndex(Number(event.target.value))}
-      />
-    </div>
-  );
-}
-
-function typedVolume(
-  image: ArrayBuffer,
-  datatypeCode: number,
-):
-  | Uint8Array
-  | Int16Array
-  | Int32Array
-  | Float32Array
-  | Float64Array
-  | Uint16Array {
-  if (datatypeCode === 2) return new Uint8Array(image);
-  if (datatypeCode === 4) return new Int16Array(image);
-  if (datatypeCode === 8) return new Int32Array(image);
-  if (datatypeCode === 16) return new Float32Array(image);
-  if (datatypeCode === 64) return new Float64Array(image);
-  if (datatypeCode === 512) return new Uint16Array(image);
-  return new Uint8Array(image);
+    const horizontal = orientation === "sagittal" ? point[2] : point[0];
+    const vertical = orientation === "coronal" ? point[2] : point[1];
+    ctx.strokeStyle = "#a6ddc8"; ctx.lineWidth = Math.max(1, width / 180);
+    ctx.beginPath(); ctx.moveTo(horizontal + .5, 0); ctx.lineTo(horizontal + .5, height);
+    ctx.moveTo(0, height - vertical - .5); ctx.lineTo(width, height - vertical - .5); ctx.stroke();
+  }, [volume, orientation, point, index, width, height, x, y]);
+  function select(event: React.MouseEvent<HTMLCanvasElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const scale = Math.min(rect.width / width, rect.height / height);
+    const offsetX = (rect.width - width * scale) / 2, offsetY = (rect.height - height * scale) / 2;
+    const px = Math.max(0, Math.min(width - 1, Math.floor((event.clientX - rect.left - offsetX) / scale)));
+    const py = Math.max(0, Math.min(height - 1, height - 1 - Math.floor((event.clientY - rect.top - offsetY) / scale)));
+    onPoint(orientation === "coronal" ? [px, index, py] : orientation === "sagittal" ? [index, py, px] : [px, py, index]);
+  }
+  return <div className="linked-slice">
+    <header><span>{["I plane", "J plane", "K plane"][axis]}</span><span>{index} / {maxIndex}</span></header>
+    <canvas ref={ref} onClick={select} aria-label={`Linked ${["I", "J", "K"][axis]} voxel slice; use sliders for keyboard selection`} />
+    <input aria-label={`${["I", "J", "K"][axis]} voxel index`} type="range" min={0} max={maxIndex} value={index} onChange={(event) => { const next = [...point] as VoxelPoint; next[axis] = Number(event.target.value); onPoint(next); }} />
+  </div>;
 }
 
 function normalizeVolume(
@@ -1165,4 +1113,27 @@ function normalizeVolume(
   }
 
   return output;
+}
+
+async function decompressBounded(buffer: ArrayBuffer): Promise<ArrayBuffer> {
+  if (typeof DecompressionStream === "undefined") throw new Error("Gzip decompression is unavailable in this browser. Import an uncompressed NIfTI.");
+  const reader = new Blob([buffer]).stream().pipeThrough(new DecompressionStream("gzip")).getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > 64 * 1024 * 1024) {
+        await reader.cancel();
+        throw new Error("Decompressed volume exceeds the 64 MiB browser preview budget.");
+      }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; }
+  return output.buffer;
 }

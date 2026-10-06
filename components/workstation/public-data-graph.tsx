@@ -4,7 +4,6 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import {
   GizmoHelper,
   GizmoViewport,
-  Html,
   OrbitControls,
 } from "@react-three/drei";
 import {
@@ -199,21 +198,17 @@ function buildGraph(
 }
 
 function GraphScene({
-  sources,
-  records,
+  graph,
+  labelElements,
 }: {
-  sources: PublicDataSource[];
-  records: KnowledgeRecord[];
+  graph: ReturnType<typeof buildGraph>;
+  labelElements: { current: Map<string, HTMLDivElement> };
 }) {
   const sourceMesh = useRef<THREE.InstancedMesh>(null);
   const datasetMesh = useRef<THREE.InstancedMesh>(null);
   const modalityMesh = useRef<THREE.InstancedMesh>(null);
   const graphGroup = useRef<THREE.Group>(null);
-
-  const graph = useMemo(
-    () => buildGraph(sources, records),
-    [sources, records],
-  );
+  const projectedLabel = useRef(new THREE.Vector3());
 
   const sourceNodes = useMemo(
     () => graph.nodes.filter((node) => node.kind === "source"),
@@ -275,6 +270,25 @@ function GraphScene({
   useFrame((state, delta) => {
     if (graphGroup.current) {
       graphGroup.current.rotation.y += delta * 0.018;
+      graphGroup.current.updateWorldMatrix(true, false);
+      state.camera.updateMatrixWorld();
+
+      // React DOM owns these nodes. The Three renderer only updates their
+      // projection styles; it never creates a second root or removes a node.
+      for (const node of sourceNodes.slice(0, 14)) {
+        const element = labelElements.current.get(node.id);
+        if (!element) continue;
+        const projected = projectedLabel.current.copy(node.position);
+        projected.y += 0.3;
+        projected.applyMatrix4(graphGroup.current.matrixWorld).project(state.camera);
+        const visible = projected.z >= -1 && projected.z <= 1;
+        element.style.visibility = visible ? "visible" : "hidden";
+        if (visible) {
+          const x = (projected.x + 1) * state.size.width / 2;
+          const y = (1 - projected.y) * state.size.height / 2;
+          element.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+        }
+      }
     }
 
     const pulse = 1 + Math.sin(state.clock.elapsedTime * 4.2) * 0.12;
@@ -357,27 +371,6 @@ function GraphScene({
           </lineSegments>
         ) : null}
 
-        {sourceNodes.slice(0, 14).map((node) => (
-          <Html
-            key={node.id}
-            position={[
-              node.position.x,
-              node.position.y + 0.3,
-              node.position.z,
-            ]}
-            center
-            transform={false}
-            distanceFactor={9}
-            style={{
-              pointerEvents: "none",
-              whiteSpace: "nowrap",
-            }}
-          >
-            <div className="graph-source-label">
-              {node.label}
-            </div>
-          </Html>
-        ))}
       </group>
 
       <OrbitControls
@@ -412,6 +405,12 @@ export default function PublicDataGraph({
   newRecords: number;
   live: boolean;
 }) {
+  const graph = useMemo(() => buildGraph(sources, records), [sources, records]);
+  const sourceLabels = useMemo(
+    () => graph.nodes.filter((node) => node.kind === "source").slice(0, 14),
+    [graph.nodes],
+  );
+  const labelElements = useRef(new Map<string, HTMLDivElement>());
   const modalityCount = useMemo(() => {
     const values = new Set<string>();
 
@@ -486,10 +485,25 @@ export default function PublicDataGraph({
           }
         >
           <GraphScene
-            sources={sources}
-            records={records}
+            graph={graph}
+            labelElements={labelElements}
           />
         </Canvas>
+
+        <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+          {sourceLabels.map((node) => (
+            <div
+              key={node.id}
+              ref={(element) => {
+                if (element) labelElements.current.set(node.id, element);
+                else labelElements.current.delete(node.id);
+              }}
+              style={{ position: "absolute", top: 0, left: 0, visibility: "hidden", whiteSpace: "nowrap", willChange: "transform" }}
+            >
+              <div className="graph-source-label">{node.label}</div>
+            </div>
+          ))}
+        </div>
 
         {!records.length ? (
           <div className="public-graph-empty">

@@ -1,4 +1,4 @@
-import type { DreamRecord } from "./morpheus";
+import type { ResearchDreamRecord as DreamRecord } from "./dataset-store";
 
 const stopWords = new Set([
   "the","a","an","and","or","but","to","of","in","on","at","for","with","from",
@@ -55,8 +55,14 @@ export type DreamSimilarity = {
   modalities: number;
   sharedTokens: string[];
   nullMean?: number;
-  permutationP?: number;
-  nullComparisons?: number;
+  tfidf?: number;
+  backgroundMean?: number;
+  backgroundTailFraction?: number;
+  backgroundComparisons?: number;
+  testedComparisons?: number;
+  familyScreeningBound?: number;
+  evidence: "descriptive_only";
+  exclusion?: string;
 };
 
 export function compareDreams(a: DreamRecord, b: DreamRecord): DreamSimilarity {
@@ -83,100 +89,84 @@ export function compareDreams(a: DreamRecord, b: DreamRecord): DreamSimilarity {
     tags: tagScore,
     modalities: modalityScore,
     sharedTokens,
+    evidence: "descriptive_only",
   };
 }
 
-function seededRandom(seedText: string) {
-  let seed = 2166136261;
-  for (let index = 0; index < seedText.length; index += 1) {
-    seed ^= seedText.charCodeAt(index);
-    seed = Math.imul(seed, 16777619);
+/** BH correction is available for planned statistical tests, never applied to these descriptive ranks. */
+export function benjaminiHochberg(pValues: number[]): number[] {
+  if (pValues.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) throw new Error("p values must lie in [0, 1].");
+  const sorted = pValues.map((value, index) => ({ value, index })).sort((a, b) => a.value - b.value);
+  const adjusted = new Array<number>(pValues.length);
+  let minimum = 1;
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    minimum = Math.min(minimum, sorted[i].value * sorted.length / (i + 1));
+    adjusted[sorted[i].index] = minimum;
   }
-
-  return () => {
-    seed += 0x6d2b79f5;
-    let value = seed;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
+  return adjusted;
 }
 
-function nullDistribution(
-  anchor: DreamRecord,
-  excludedId: string,
-  records: DreamRecord[],
-  iterations = 96,
-) {
-  const pool = records.filter(
-    (record) =>
-      record.dream_id !== anchor.dream_id &&
-      record.dream_id !== excludedId,
-  );
-
-  if (!pool.length) return [] as number[];
-
-  const random = seededRandom(
-    anchor.dream_id + ":" + excludedId,
-  );
-  const scores: number[] = [];
-
-  for (let index = 0; index < iterations; index += 1) {
-    const candidate =
-      pool[Math.floor(random() * pool.length) % pool.length];
-    scores.push(compareDreams(anchor, candidate).score);
-  }
-
-  return scores;
+function episodeKey(record: DreamRecord) {
+  // Missing legacy episode metadata cannot establish independence.
+  return record.capture ? record.capture.subject_id + ":" + record.capture.session_id + ":" + record.capture.sleep_episode_id : null;
 }
 
-export function recurrenceCandidates(
-  records: DreamRecord[],
-  limit = 12,
-) {
+function sameEpisode(a: DreamRecord, b: DreamRecord) {
+  return episodeKey(a) !== null && episodeKey(a) === episodeKey(b);
+}
+
+function tfidfVector(record: DreamRecord, records: DreamRecord[]) {
+  const result = vector(record.raw_report);
+  for (const [token, count] of result) {
+    const documents = records.filter((row) => tokens(row.raw_report).includes(token)).length;
+    result.set(token, count * (1 + Math.log((records.length + 1) / (documents + 1))));
+  }
+  return result;
+}
+
+export function recurrenceCandidates(records: DreamRecord[], limit = 12) {
+  // A comparator episode is used once, not sampled repeatedly to inflate a null n.
+  const unique = [...new Map(records.map((record) => [record.dream_id, record])).values()];
   const pairs: DreamSimilarity[] = [];
-
-  for (let i = 0; i < records.length; i += 1) {
-    for (let j = i + 1; j < records.length; j += 1) {
-      const observed = compareDreams(records[i], records[j]);
-      const nullScores = [
-        ...nullDistribution(
-          records[i],
-          records[j].dream_id,
-          records,
-        ),
-        ...nullDistribution(
-          records[j],
-          records[i].dream_id,
-          records,
-        ),
-      ];
-
-      if (nullScores.length) {
-        observed.nullMean =
-          nullScores.reduce(
-            (sum, value) => sum + value,
-            0,
-          ) / nullScores.length;
-        observed.permutationP =
-          (1 +
-            nullScores.filter(
-              (value) => value >= observed.score,
-            ).length) /
-          (nullScores.length + 1);
-        observed.nullComparisons = nullScores.length;
+  const tfidf = new Map(unique.map((record) => [record.dream_id, tfidfVector(record, unique)]));
+  for (let i = 0; i < unique.length; i += 1) {
+    for (let j = i + 1; j < unique.length; j += 1) {
+      const a = unique[i];
+      const b = unique[j];
+      if (sameEpisode(a, b)) continue;
+      const observed = compareDreams(a, b);
+      observed.tfidf = cosine(tfidf.get(a.dream_id)!, tfidf.get(b.dream_id)!);
+      // Disjoint, unique episode pairs. Only known, same-subject episodes qualify.
+      // These are background comparisons, not known negatives or a permutation test.
+      const available = unique.filter((record) => {
+        const key = episodeKey(record);
+        return key && record.dream_id !== a.dream_id && record.dream_id !== b.dream_id &&
+          key !== episodeKey(a) && key !== episodeKey(b) &&
+          a.capture?.subject_id === b.capture?.subject_id &&
+          record.capture?.subject_id === a.capture?.subject_id;
+      }).sort((left, right) => left.dream_id.localeCompare(right.dream_id));
+      const used = new Set<string>();
+      const independent: DreamRecord[] = [];
+      for (const record of available) {
+        const key = episodeKey(record)!;
+        if (!used.has(key)) { used.add(key); independent.push(record); }
       }
-
+      const background: number[] = [];
+      for (let k = 0; k + 1 < independent.length; k += 2) background.push(compareDreams(independent[k], independent[k + 1]).score);
+      observed.backgroundComparisons = background.length;
+      if (background.length) {
+        observed.backgroundMean = background.reduce((sum, value) => sum + value, 0) / background.length;
+        observed.backgroundTailFraction = (1 + background.filter((value) => value >= observed.score).length) / (background.length + 1);
+      } else {
+        observed.exclusion = "No disjoint, same-subject background episodes with known episode IDs.";
+      }
       pairs.push(observed);
     }
   }
-
-  return pairs
-    .sort((left, right) => {
-      const leftP = left.permutationP ?? 1;
-      const rightP = right.permutationP ?? 1;
-      if (leftP !== rightP) return leftP - rightP;
-      return right.score - left.score;
-    })
-    .slice(0, limit);
+  for (const pair of pairs) {
+    pair.testedComparisons = pairs.length;
+    // A conservative family-size screen, not a corrected p value or significance.
+    if (pair.backgroundTailFraction !== undefined) pair.familyScreeningBound = Math.min(1, pair.backgroundTailFraction * pairs.length);
+  }
+  return pairs.sort((left, right) => right.score - left.score).slice(0, Math.max(0, limit));
 }

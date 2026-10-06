@@ -25,6 +25,7 @@ from app.protocol import (
     MRPH_VERSION,
     encode_sample_batch,
 )
+from app.model_api import router as model_router, close_runtime
 
 try:
     from pylsl import (
@@ -52,11 +53,14 @@ except Exception:
     RTCPeerConnection = None
     RTCSessionDescription = None
 
-app = FastAPI(title="Morpheus Signal Gateway", version="0.7.0")
+app = FastAPI(title="Morpheus Signal Gateway", version="0.8.0")
+app.include_router(model_router)
+app.include_router(model_router, prefix="/api/signal-gateway", include_in_schema=False)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://(localhost(:\d+)?|.*\.vercel\.app)",
+    allow_origins=["https://morpheus-three.vercel.app", *filter(None, os.environ.get("MORPHEUS_ALLOWED_ORIGINS", "").split(","))],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?",
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -165,6 +169,7 @@ async def shutdown_native_bridge() -> None:
     if NATIVE_TRANSPORT is not None:
         NATIVE_TRANSPORT.close()
         NATIVE_TRANSPORT = None
+    await asyncio.to_thread(close_runtime)
 
 
 class LocalRecorder:

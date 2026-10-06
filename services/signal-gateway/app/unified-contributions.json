@@ -1,0 +1,389 @@
+{
+  "schema": "morpheus-unified-contributions-v1",
+  "graphVersion": "1.1.0",
+  "architectureVersion": "1.1.0",
+  "modelId": "morpheus-shared-encoder",
+  "recipeId": "morpheus-shared-representation-v1",
+  "architecture": {
+    "backbone": {
+      "name": "Feature-token Transformer",
+      "featureValueProjection": "linear scalar-to-latent",
+      "featureIdentity": "learned ordered feature embeddings",
+      "encoderLayers": 1,
+      "attentionHeads": 4,
+      "activation": "GELU",
+      "pooling": "mean feature-token pooling followed by LayerNorm",
+      "hiddenWidths": [
+        16,
+        32,
+        64
+      ]
+    },
+    "heads": [
+      {
+        "id": "classification-head",
+        "slotId": "state-classification",
+        "type": "linear",
+        "loss": "cross-entropy",
+        "weight": 1
+      },
+      {
+        "id": "outcome-head",
+        "slotId": "measured-outcome-regression",
+        "type": "linear",
+        "loss": "masked training-scaled mean squared error on observed measurements",
+        "weight": 0.5
+      }
+    ],
+    "losses": {
+      "joint": "cross_entropy_all_labels + 0.5 * masked_outcome_mse",
+      "sharedParameters": "Both heads update one encoder; this is joint training, not result fusion from separate tools."
+    },
+    "optimization": {
+      "optimizer": "AdamW",
+      "learningRate": 0.003,
+      "weightDecay": 0.0001,
+      "gradientNormClip": 5,
+      "batchSize": 64,
+      "device": "CPU",
+      "threads": 1,
+      "seedRecorded": true
+    },
+    "nodes": [
+      {
+        "id": "input",
+        "title": "Compatible neural features",
+        "kind": "INPUT"
+      },
+      {
+        "id": "fold-scaling",
+        "title": "Training-fold scaling",
+        "kind": "PREPROCESSING"
+      },
+      {
+        "id": "shared-encoder",
+        "title": "Shared feature-token Transformer",
+        "kind": "BACKBONE"
+      },
+      {
+        "id": "classification-head",
+        "title": "Classification head",
+        "kind": "HEAD"
+      },
+      {
+        "id": "outcome-head",
+        "title": "Measured-outcome head",
+        "kind": "HEAD"
+      },
+      {
+        "id": "joint-loss",
+        "title": "Joint training loss",
+        "kind": "OBJECTIVE"
+      },
+      {
+        "id": "whole-unit-evaluation",
+        "title": "Whole-subject holdout",
+        "kind": "EVALUATION"
+      }
+    ],
+    "edges": [
+      {
+        "from": "input",
+        "to": "fold-scaling",
+        "relation": "training-only fit"
+      },
+      {
+        "from": "fold-scaling",
+        "to": "shared-encoder",
+        "relation": "common representation input"
+      },
+      {
+        "from": "shared-encoder",
+        "to": "classification-head",
+        "relation": "shared latent"
+      },
+      {
+        "from": "shared-encoder",
+        "to": "outcome-head",
+        "relation": "shared latent"
+      },
+      {
+        "from": "classification-head",
+        "to": "joint-loss",
+        "relation": "cross-entropy"
+      },
+      {
+        "from": "outcome-head",
+        "to": "joint-loss",
+        "relation": "0.5 * scaled MSE"
+      },
+      {
+        "from": "joint-loss",
+        "to": "shared-encoder",
+        "relation": "joint parameter gradients"
+      },
+      {
+        "from": "classification-head",
+        "to": "whole-unit-evaluation",
+        "relation": "held-out label predictions"
+      },
+      {
+        "from": "outcome-head",
+        "to": "whole-unit-evaluation",
+        "relation": "held-out measured outcomes"
+      }
+    ]
+  },
+  "inputContract": {
+    "id": "morpheus-shared-features-v1",
+    "rows": {
+      "min": 48,
+      "max": 4096,
+      "required": [
+        "id",
+        "subjectId",
+        "sessionId",
+        "features",
+        "featureNames",
+        "label",
+        "outcome"
+      ],
+      "features": {
+        "min": 1,
+        "max": 32,
+        "orderedNamesCommon": true,
+        "finite": true,
+        "maximumMagnitude": 1000000
+      },
+      "labels": {
+        "min": 2,
+        "max": 8,
+        "minimumPerUnitPerClass": 2
+      },
+      "outcome": {
+        "finiteMeasurementOrExplicitNull": true,
+        "minimumObservedPerUnit": 2,
+        "missingTargetRule": "Exclude unmeasured targets from outcome scaling, regression loss and MAE; preserve classification labels."
+      },
+      "independentUnits": {
+        "field": "subjectId",
+        "min": 6,
+        "max": 16,
+        "publicPilotMeaning": "independent animal or human participant; never neuron, trial or awakening"
+      }
+    },
+    "source": {
+      "kind": "synthetic | public-neural-recording",
+      "required": [
+        "datasetId",
+        "datasetVersion",
+        "featureSchema",
+        "license"
+      ],
+      "publicUrl": "Required public HTTPS source for public-neural-recording"
+    },
+    "design": {
+      "inputTiming": [
+        "pre-task-event",
+        "pre-awakening"
+      ],
+      "assignment": "observational",
+      "independentUnitsConfirmed": true
+    },
+    "evaluation": "Leave one entire independent subject out; fit feature scaling on all training rows and outcome scaling on observed training measurements; regression MAE covers observed targets only; final checkpoint refits all admitted rows after evaluation."
+  },
+  "computeBound": {
+    "rows": 4096,
+    "features": 32,
+    "independentUnits": 16,
+    "epochs": {
+      "min": 10,
+      "max": 100,
+      "default": 30
+    },
+    "hiddenWidth": {
+      "allowed": [
+        16,
+        32,
+        64
+      ],
+      "default": 32
+    },
+    "maximumOperationEstimate": 2000000000,
+    "estimate": "rows * epochs * (units + 1) * features * hiddenWidth^2",
+    "batchSize": 64,
+    "queuedJobs": 4,
+    "workers": 1
+  },
+  "contributions": [
+    {
+      "id": "morpheus-c-category-objective-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_ADAPTATION",
+      "slotIds": [
+        "state-classification"
+      ],
+      "sourcePaperIds": [
+        "guo-inagaki-2017"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "guo-inagaki-2017",
+          "relationship": "application_context_only"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "SharedModel.classification",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-held-out-unit-validation-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_CONTROL",
+      "slotIds": [
+        "held-out-unit-evaluation"
+      ],
+      "sourcePaperIds": [
+        "guo-inagaki-2017"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "guo-inagaki-2017",
+          "relationship": "application_context_only"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "folds",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-joint-multitask-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_ADAPTATION",
+      "slotIds": [
+        "joint-multitask-objective"
+      ],
+      "sourcePaperIds": [
+        "caruana-1997"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "caruana-1997",
+          "relationship": "implemented_technique_adaptation"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "fit.joint_loss",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-measured-response-objective-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_ADAPTATION",
+      "slotIds": [
+        "measured-outcome-regression"
+      ],
+      "sourcePaperIds": [
+        "guo-inagaki-2017"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "guo-inagaki-2017",
+          "relationship": "application_context_only"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "SharedModel.regression",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-perturbation-control-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_CONTROL",
+      "slotIds": [
+        "perturbation-controls"
+      ],
+      "sourcePaperIds": [
+        "guo-inagaki-2017"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "guo-inagaki-2017",
+          "relationship": "application_context_only"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "validate_unified_request",
+          "component": "source_design_and_feature_gates",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-training-fold-scaling-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_CONTROL",
+      "slotIds": [
+        "training-fold-scaling"
+      ],
+      "sourcePaperIds": [],
+      "sourceMappings": [],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "fit.preprocessing",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    },
+    {
+      "id": "morpheus-c-transformer-backbone-v1",
+      "version": "1.0.0",
+      "role": "ENGINEERING_ADAPTATION",
+      "slotIds": [
+        "shared-representation-backbone"
+      ],
+      "sourcePaperIds": [
+        "vaswani-2017"
+      ],
+      "sourceMappings": [
+        {
+          "paperId": "vaswani-2017",
+          "relationship": "implemented_technique_adaptation"
+        }
+      ],
+      "runtimeBindings": [
+        {
+          "path": "services/signal-gateway/app/unified_model.py",
+          "symbol": "train_unified",
+          "component": "SharedModel.backbone",
+          "implementationVersion": "morpheus-shared-representation-1.1.0"
+        }
+      ]
+    }
+  ],
+  "contentSha256": "b13406bc292118c2a98c3312107eb3f2a6128a2bcb93667903ca5141ea3fa924"
+}

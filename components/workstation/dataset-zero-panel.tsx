@@ -10,10 +10,13 @@ import {
   LockKeyhole,
   Trash2,
 } from "lucide-react";
-import type { DreamRecord } from "@/lib/morpheus";
 import { downloadJson, sha256 } from "@/lib/morpheus";
 import { recurrenceCandidates } from "@/lib/dream-analysis";
 import {
+  appendDreamAnnotation,
+  dreamCorpusExport,
+  reportLatencySeconds,
+  type ResearchDreamRecord,
   deleteDreamRecord,
   listDreamRecords,
   putDreamRecord,
@@ -32,7 +35,7 @@ const modalities = [
 ];
 
 export default function DatasetZeroPanel() {
-  const [records, setRecords] = useState<DreamRecord[]>([]);
+  const [records, setRecords] = useState<ResearchDreamRecord[]>([]);
   const [report, setReport] = useState("");
   const [lucid, setLucid] = useState(false);
   const [confidence, setConfidence] = useState(4);
@@ -40,6 +43,14 @@ export default function DatasetZeroPanel() {
   const [selectedModalities, setSelectedModalities] = useState<string[]>(["visual"]);
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [storageError, setStorageError] = useState("");
+  const [subjectId, setSubjectId] = useState("subject-001");
+  const [sessionId, setSessionId] = useState("");
+  const [episodeId, setEpisodeId] = useState("");
+  const [awakenedAt, setAwakenedAt] = useState("");
+  const [priorRecall, setPriorRecall] = useState<"yes" | "no" | "unknown">("unknown");
+  const [annotationTarget, setAnnotationTarget] = useState("");
+  const [annotationNote, setAnnotationNote] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -47,6 +58,8 @@ export default function DatasetZeroPanel() {
       if (!active) return;
       setRecords(items);
       setLoaded(true);
+    }).catch((error: unknown) => {
+      if (active) { setStorageError(error instanceof Error ? error.message : "Could not load the local corpus."); setLoaded(true); }
     });
     return () => {
       active = false;
@@ -54,15 +67,27 @@ export default function DatasetZeroPanel() {
   }, []);
 
   const createRecord = async () => {
-    const raw = report.trim();
-    if (!raw || saving) return;
+    const raw = report;
+    if (!raw.trim() || saving) return;
+    if (![subjectId, sessionId, episodeId].every((value) => value.trim())) { setStorageError("Enter pseudonymous subject, session and sleep episode IDs before sealing."); return; }
 
     setSaving(true);
+    setStorageError("");
     try {
       const captured = new Date().toISOString();
       const digest = await sha256(raw);
-      const record: DreamRecord = {
-        dream_id: `D-${captured.replace(/[-:.TZ]/g, "").slice(0, 14)}-${digest.slice(0, 6)}`,
+      const awakened = awakenedAt ? new Date(awakenedAt).toISOString() : null;
+      const record: ResearchDreamRecord = {
+        schema_version: "dataset-zero-v2",
+        capture: {
+          subject_id: subjectId.trim(), session_id: sessionId.trim(), sleep_episode_id: episodeId.trim(),
+          awakening_id: crypto.randomUUID(), awakened_at: awakened,
+          report_latency_seconds: reportLatencySeconds(awakened, captured),
+          awakening_method: "unknown", sleep_stage: null, protocol_version: "m0-capture-v2",
+          recording_id: null, marker_ids: [], prior_related_recall: priorRecall,
+        },
+        annotations: [],
+        dream_id: `D-${crypto.randomUUID()}`,
         captured_at: captured,
         raw_report: raw,
         raw_sha256: digest,
@@ -82,6 +107,8 @@ export default function DatasetZeroPanel() {
       setLucid(false);
       setConfidence(4);
       setSelectedModalities(["visual"]);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "Report could not be saved. Your text remains in the editor.");
     } finally {
       setSaving(false);
     }
@@ -92,8 +119,28 @@ export default function DatasetZeroPanel() {
       "Delete this local sealed record from this browser? This cannot be undone from Morpheus.",
     );
     if (!confirmed) return;
-    await deleteDreamRecord(dreamId);
-    setRecords((current) => current.filter((item) => item.dream_id !== dreamId));
+    try {
+      await deleteDreamRecord(dreamId);
+      setRecords((current) => current.filter((item) => item.dream_id !== dreamId));
+    } catch (error) { setStorageError(error instanceof Error ? error.message : "Record could not be deleted."); }
+  };
+
+  const addAnnotation = async () => {
+    const record = records.find((row) => row.dream_id === annotationTarget);
+    if (!record || !annotationNote.trim() || saving) return;
+    setSaving(true);
+    setStorageError("");
+    try {
+      const next = appendDreamAnnotation(record, {
+        id: crypto.randomUUID(), created_at: new Date().toISOString(), annotator_id: subjectId.trim() || "self",
+        method: "self_report", blinding: "unblinded", note: annotationNote, tags: [], entities: [], locations: [], events: [],
+        subjective_recurrence: null, subjective_continuation: null,
+      });
+      await putDreamRecord(next);
+      setRecords((current) => current.map((row) => row.dream_id === next.dream_id ? next : row));
+      setAnnotationNote(""); setAnnotationTarget("");
+    } catch (error) { setStorageError(error instanceof Error ? error.message : "Annotation could not be saved."); }
+    finally { setSaving(false); }
   };
 
   const totalWords = useMemo(
@@ -112,19 +159,16 @@ export default function DatasetZeroPanel() {
 
   return (
     <div className="space-y-4">
+      {storageError ? <div role="alert" className="rounded-lg border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">{storageError}</div> : null}
       <Panel>
         <SectionHeader
           eyebrow="Dataset Zero"
           title="Immutable dream capture"
-          description="Raw reports are hashed before storage and retained in browser IndexedDB rather than transient React state or ordinary localStorage. Annotations remain separate from the sealed original."
+          description="Seal the exact narrative with capture context. Later annotations are separate, attributed revisions. Reports stay in this browser; export a backup before clearing site data."
           action={
             <button
               onClick={() =>
-                downloadJson("morpheus-dataset-zero.json", {
-                  exported_at: new Date().toISOString(),
-                  schema: "morpheus-dataset-zero-v1",
-                  records,
-                })
+                downloadJson("morpheus-dataset-zero.json", dreamCorpusExport(records))
               }
               disabled={!records.length}
               className="button-secondary disabled:cursor-not-allowed disabled:opacity-40"
@@ -165,6 +209,13 @@ export default function DatasetZeroPanel() {
             description="Seal only after the raw narrative is complete. The hold interlock prevents accidental irreversible capture."
           />
           <div className="space-y-4 p-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="field-label"><span>Subject ID (pseudonym)</span><input className="field-control" value={subjectId} onChange={(event) => setSubjectId(event.target.value)} placeholder="subject-001" /></label>
+              <label className="field-label"><span>Session ID</span><input className="field-control" value={sessionId} onChange={(event) => setSessionId(event.target.value)} placeholder="sleep-session-001" /></label>
+              <label className="field-label"><span>Sleep episode ID</span><input className="field-control" value={episodeId} onChange={(event) => setEpisodeId(event.target.value)} placeholder="Same ID for reports from one episode" /></label>
+              <label className="field-label"><span>Awakening time (optional)</span><input type="datetime-local" className="field-control" value={awakenedAt} onChange={(event) => setAwakenedAt(event.target.value)} /></label>
+            </div>
+            <label className="field-label"><span>Recalled a related dream before sleeping?</span><select className="field-control" value={priorRecall} onChange={(event) => setPriorRecall(event.target.value as "yes" | "no" | "unknown")}><option value="unknown">Unknown</option><option value="yes">Yes</option><option value="no">No</option></select></label>
             <label className="field-label">
               <span>Raw report</span>
               <textarea
@@ -252,7 +303,7 @@ export default function DatasetZeroPanel() {
             </label>
 
             <HoldToSeal
-              disabled={!report.trim() || saving}
+              disabled={!report.trim() || !subjectId.trim() || !sessionId.trim() || !episodeId.trim() || saving}
               busy={saving}
               onConfirm={createRecord}
             />
@@ -312,6 +363,12 @@ export default function DatasetZeroPanel() {
                     </button>
                   </div>
 
+                  <div className="mt-3 text-xs leading-5 text-slate-400">
+                    {record.capture ? `${record.capture.subject_id} · ${record.capture.session_id} · episode ${record.capture.sleep_episode_id} · report latency ${record.capture.report_latency_seconds === null ? "unknown" : record.capture.report_latency_seconds + " s"}` : "Legacy capture: subject, episode and report latency unknown"}
+                  </div>
+                  {(record.annotations || []).map((annotation) => <p key={annotation.id} className="mt-3 border-l border-white/15 pl-3 text-sm leading-6 text-slate-300">Annotation {annotation.revision} · {annotation.annotator_id}: {annotation.note}</p>)}
+                  <button className="button-secondary mt-3" onClick={() => { setAnnotationTarget(record.dream_id); setAnnotationNote(""); }}>Add annotation</button>
+                  {annotationTarget === record.dream_id ? <div className="mt-3 space-y-3"><label className="field-label"><span>Separate annotation (raw text stays sealed)</span><textarea className="dataset-textarea" rows={3} value={annotationNote} onChange={(event) => setAnnotationNote(event.target.value)} /></label><button className="button-primary" disabled={!annotationNote.trim() || saving} onClick={() => void addAnnotation()}>Save annotation revision</button><button className="button-secondary ml-2" onClick={() => setAnnotationTarget("")}>Cancel</button></div> : null}
                   <div className="mt-4 grid gap-2 md:grid-cols-[1fr_2fr]">
                     <div className="flex items-center gap-2 text-[10px] text-slate-650">
                       <FileKey2 size={12} />
@@ -338,7 +395,7 @@ export default function DatasetZeroPanel() {
         <SectionHeader
           eyebrow="M1 local baseline"
           title="Recurrence candidates"
-          description="A deterministic local lexical, tag, and modality baseline ranks candidate pairs and compares each observed score against non-matching corpus pairs. The permutation-style null is a screening statistic, not evidence that two dreams are the same episode."
+          description="Lexical, TF-IDF, tag and sensory comparisons screen report pairs. Background ranks use disjoint, known episodes from the same subject. They are descriptive: no permutation significance or recovered dream identity is claimed. All scanned comparisons count toward the family screen."
           action={<span className="tag-muted">{candidates.length} PAIRS</span>}
         />
         {candidates.length ? (
@@ -358,9 +415,10 @@ export default function DatasetZeroPanel() {
                   {(pair.score * 100).toFixed(1)}%
                 </span>
                 <span className="font-mono text-[10px] text-slate-500">
-                  {pair.permutationP != null
-                    ? "p=" + pair.permutationP.toFixed(3)
-                    : "null n/a"}
+                  {pair.backgroundTailFraction != null
+                    ? `background rank ${pair.backgroundTailFraction.toFixed(3)} · n=${pair.backgroundComparisons}; family screen ${pair.familyScreeningBound?.toFixed(3)} (${pair.testedComparisons} pairs)`
+                    : `background unavailable · ${pair.testedComparisons} pairs scanned`}
+                  <span className="block mt-1">TF-IDF {((pair.tfidf || 0) * 100).toFixed(1)}% · descriptive only</span>
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {pair.sharedTokens.length ? (

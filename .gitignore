@@ -28,3 +28,9 @@ recordings/
 *.vmrk
 artifacts/
 tmp/
+native/**/build*/
+native/**/target/
+services/**/build*/
+*.tsbuildinfo
+.local/
+.env*

@@ -47,24 +47,21 @@ self.onmessage = (event) => {
 };
 
 function normalizeRows(rows) {
-  if (!Array.isArray(rows)) return [];
-
-  return rows
-    .map((row) => ({
+  if (!Array.isArray(rows)) throw new Error("Research rows must be an array.");
+  return rows.map((row) => {
+    if (!row || typeof row.id !== "string" || !row.id || typeof (row.label || row.state) !== "string" || !Array.isArray(row.features) || !row.features.length || !row.features.every((value) => typeof value === "number" && Number.isFinite(value))) {
+      throw new Error("Every research snapshot needs an ID, label and finite numeric features; invalid rows cannot be silently dropped.");
+    }
+    return {
       id: String(row?.id || ""),
       sessionId: String(row?.sessionId || ""),
+      subjectId: String(row?.subjectId || ""),
       label: String(row?.label || row?.state || ""),
       features: Array.isArray(row?.features)
         ? row.features.map(Number)
         : [],
-    }))
-    .filter(
-      (row) =>
-        row.id &&
-        row.label &&
-        row.features.length &&
-        row.features.every(Number.isFinite),
-    );
+    };
+  });
 }
 
 function runBaseline(rows, permutations) {
@@ -82,6 +79,18 @@ function runBaseline(rows, permutations) {
     throw new Error("All snapshots must have identical feature width.");
   }
 
+  const sessions = unique(rows.map((row) => row.sessionId));
+  if (sessions.length < 3 || sessions.includes("")) {
+    throw new Error("At least three explicitly identified sessions are required. Same-session holdout is never replaced by row holdout.");
+  }
+  if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new Error("Duplicate snapshot IDs are not independent observations.");
+  if (unique(rows.map((row) => row.subjectId)).length > 1) throw new Error("Select one subject for this subject-specific baseline.");
+  for (const session of sessions) {
+    if (unique(rows.filter((row) => row.sessionId === session).map((row) => row.label)).length !== labels.length) {
+      throw new Error("Every session must contain every label for session-blocked evaluation.");
+    }
+  }
+  if (rows.length > 512 || featureLength > 64) throw new Error("Reference browser evaluation supports at most 512 rows and 64 features; use the local model service for larger jobs.");
   const predictions = leaveOneSessionOut(rows);
   const accuracy =
     predictions.filter((item) => item.predicted === item.actual).length /
@@ -121,19 +130,17 @@ function runBaseline(rows, permutations) {
   const count = Math.max(20, Math.min(500, permutations));
 
   for (let iteration = 0; iteration < count; iteration += 1) {
-    const shuffled = shuffle(
-      rows.map((row) => row.label),
-      rng,
-    );
-    const permuted = rows.map((row, index) => ({
-      ...row,
-      label: shuffled[index],
-    }));
+    const permuted = rows.map((row) => ({ ...row }));
+    for (const session of sessions) {
+      const indices = rows.map((row, index) => row.sessionId === session ? index : -1).filter((index) => index >= 0);
+      const shuffled = shuffle(indices.map((index) => rows[index].label), rng);
+      indices.forEach((index, position) => { permuted[index].label = shuffled[position]; });
+    }
     const permPredictions = leaveOneSessionOut(permuted);
-    const score =
-      permPredictions.filter(
-        (item) => item.predicted === item.actual,
-      ).length / Math.max(1, permPredictions.length);
+    const score = labels.reduce((sum, label) => {
+      const subset = permPredictions.filter((item) => item.actual === label);
+      return sum + subset.filter((item) => item.predicted === label).length / subset.length;
+    }, 0) / labels.length;
     nullScores.push(score);
   }
 
@@ -142,7 +149,7 @@ function runBaseline(rows, permutations) {
     Math.max(1, nullScores.length);
   const pValue =
     (1 +
-      nullScores.filter((value) => value >= accuracy).length) /
+      nullScores.filter((value) => value >= balancedAccuracy).length) /
     (nullScores.length + 1);
 
   return {
@@ -155,52 +162,35 @@ function runBaseline(rows, permutations) {
     balancedAccuracy,
     nullMean,
     permutationP: pValue,
+    independentSessions: sessions.length,
+    nullMethod: "within-session label shuffling; assumes exchangeable non-overlapping observations",
+    limitations: "Exploratory state-label evaluation, not dream reconstruction. Correct across models/runs before confirmatory claims.",
     confusion,
     predictions,
   };
 }
 
 function leaveOneSessionOut(rows) {
-  return rows.map((testRow, testIndex) => {
-    const training = rows.filter((row, index) => {
-      if (index === testIndex) return false;
-      if (
-        testRow.sessionId &&
-        row.sessionId &&
-        testRow.sessionId === row.sessionId
-      ) {
-        return false;
+  const predictions = [];
+  for (const session of unique(rows.map((row) => row.sessionId))) {
+    const training = rows.filter((row) => row.sessionId !== session);
+    if (!training.length) throw new Error("No independent training sessions remain.");
+    const width = rows[0].features.length;
+    const mean = Array.from({ length: width }, (_, index) => training.reduce((sum, row) => sum + row.features[index], 0) / training.length);
+    const scale = mean.map((value, index) => Math.max(1e-9, Math.sqrt(training.reduce((sum, row) => sum + (row.features[index] - value) ** 2, 0) / training.length)));
+    const transform = (row) => row.features.map((value, index) => (value - mean[index]) / scale[index]);
+    const centroids = classCentroids(training.map((row) => ({ ...row, features: transform(row) })));
+    for (const testRow of rows.filter((row) => row.sessionId === session)) {
+      let bestLabel = "";
+      let bestDistance = Infinity;
+      for (const label of Object.keys(centroids).sort()) {
+        const distance = squaredDistance(transform(testRow), centroids[label]);
+        if (distance < bestDistance) { bestDistance = distance; bestLabel = label; }
       }
-      return true;
-    });
-
-    const usable = training.length
-      ? training
-      : rows.filter((_, index) => index !== testIndex);
-
-    const centroids = classCentroids(usable);
-    let bestLabel = "";
-    let bestDistance = Number.POSITIVE_INFINITY;
-
-    for (const [label, centroid] of Object.entries(centroids)) {
-      const distance = squaredDistance(
-        testRow.features,
-        centroid,
-      );
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        bestLabel = label;
-      }
+      predictions.push({ id: testRow.id, sessionId: session, actual: testRow.label, predicted: bestLabel, distance: Math.sqrt(bestDistance) });
     }
-
-    return {
-      id: testRow.id,
-      sessionId: testRow.sessionId,
-      actual: testRow.label,
-      predicted: bestLabel,
-      distance: Math.sqrt(bestDistance),
-    };
-  });
+  }
+  return predictions;
 }
 
 function classCentroids(rows) {

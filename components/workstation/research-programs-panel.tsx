@@ -20,6 +20,8 @@ import {
 } from "lucide-react";
 import type { WorkstationView } from "@/lib/morpheus";
 import {
+  longitudinalAtlasSummary,
+  normalizeAtlasSnapshot,
   deleteAtlasSnapshot,
   listAtlasSnapshots,
   putAtlasSnapshot,
@@ -59,7 +61,7 @@ const programs: Program[] = [
     title: "Dataset Zero",
     status: "EXECUTABLE",
     objective:
-      "Create immutable, machine-readable dream ground truth with timestamps, provenance and separated annotations.",
+      "Create immutable, machine-readable dream reports with timestamps, provenance and separated annotations.",
     nullHypothesis:
       "No structured recurrence or testable continuity can be established beyond subjective post-hoc interpretation.",
     inputs: ["Immediate raw reports", "Capture timestamps", "Sleep metadata", "Lucidity and confidence"],
@@ -204,7 +206,7 @@ export default function ResearchProgramsPanel({
       else request.reject(new Error(message.error || "Research worker failed"));
     };
 
-    void listAtlasSnapshots().then(setSnapshots).catch(() => {});
+    void listAtlasSnapshots().then((rows) => setSnapshots(rows.map(normalizeAtlasSnapshot))).catch((error: unknown) => setRuntimeError(error instanceof Error ? error.message : "Atlas storage could not be loaded."));
 
     return () => {
       signalWorker.current?.stop();
@@ -226,6 +228,9 @@ export default function ResearchProgramsPanel({
       return Promise.reject(new Error("Research worker is unavailable."));
     }
 
+    const normalized = rows.map(normalizeAtlasSnapshot);
+    const families = new Set(normalized.map((row) => JSON.stringify([row.provenance?.sourceKind, row.provenance?.featureSchema, row.featureNames])));
+    if (families.size > 1) return Promise.reject(new Error("Incompatible source kinds or feature schemas. Keep simulation, acquired and unknown measurements in separate evaluations."));
     const id = crypto.randomUUID();
     return new Promise<ResearchWorkerResult>((resolve, reject) => {
       pending.current.set(id, { resolve, reject });
@@ -233,9 +238,13 @@ export default function ResearchProgramsPanel({
         id,
         type,
         permutations: 120,
-        rows: rows.map((snapshot) => ({
+        rows: normalized.map((snapshot) => ({
           id: snapshot.id,
           sessionId: snapshot.sessionId,
+          subjectId: snapshot.subjectId,
+          sourceKind: snapshot.provenance?.sourceKind,
+          featureSchema: snapshot.provenance?.featureSchema,
+          featureNames: snapshot.featureNames,
           label: snapshot.state,
           features: snapshot.features,
         })),
@@ -268,7 +277,7 @@ export default function ResearchProgramsPanel({
 
       if (!analysis) throw new Error("Signal analysis did not return.");
 
-      const snapshot = featureSnapshot({
+      const snapshot = normalizeAtlasSnapshot(featureSnapshot({
         subjectId,
         sessionId,
         state: stateLabel,
@@ -277,7 +286,7 @@ export default function ResearchProgramsPanel({
         sampleRate: Math.max(1, sampleRate || 256),
         channelCount: channelSamples.length,
         analysis: analysis.metrics,
-      });
+      }));
 
       await putAtlasSnapshot(snapshot);
       const next = [...snapshots, snapshot];
@@ -314,19 +323,18 @@ export default function ResearchProgramsPanel({
   };
 
   const clearSnapshot = async (id: string) => {
-    await deleteAtlasSnapshot(id);
-    const next = snapshots.filter((item) => item.id !== id);
-    setSnapshots(next);
-    setBaseline(null);
-
-    const subjectRows = next.filter((item) => item.subjectId === subjectId);
-    if (subjectRows.length) {
-      try {
+    setRuntimeError("");
+    try {
+      await deleteAtlasSnapshot(id);
+      const next = snapshots.filter((item) => item.id !== id);
+      setSnapshots(next); setBaseline(null);
+      const subjectRows = next.filter((item) => item.subjectId === subjectId);
+      if (subjectRows.length) {
         const result = await runResearchWorker("atlas", subjectRows);
         setAtlas(result.result || null);
-      } catch {}
-    } else {
-      setAtlas(null);
+      } else setAtlas(null);
+    } catch (error) {
+      setRuntimeError(error instanceof Error ? error.message : "Unable to delete the local snapshot or refresh the atlas.");
     }
   };
 
@@ -503,7 +511,7 @@ export default function ResearchProgramsPanel({
               {selected === "M3" ? (
                 <BaselineResult result={baseline} />
               ) : (
-                <AtlasResult result={atlas} snapshots={subjectSnapshots} onDelete={clearSnapshot} />
+                <><AtlasResult result={atlas} snapshots={subjectSnapshots} onDelete={clearSnapshot} /><LongitudinalAtlas snapshots={subjectSnapshots} subjectId={subjectId} /></>
               )}
             </div>
           </div>
@@ -617,7 +625,7 @@ function BaselineResult({ result }: { result: Record<string, any> | null }) {
   if (!result) {
     return (
       <div className="research-empty">
-        Capture at least four snapshots from at least two labeled states and preferably multiple sessions.
+        Capture at least four snapshots from at least two labeled states and at least three sessions, with both states in each session.
       </div>
     );
   }
@@ -634,6 +642,8 @@ function BaselineResult({ result }: { result: Record<string, any> | null }) {
       <div className="research-result-note">
         {String(result.validation || "")} · {String(result.classifier || "")} · {String(result.rows || 0)} snapshots · {String(result.featureLength || 0)} features
       </div>
+      <p className="research-result-note">{String(result.nullMethod || "Within-session label-shuffle reference.")}</p>
+      {Array.isArray(result.limitations) ? result.limitations.map((limit: unknown, index: number) => <p className="research-result-note" key={index}>{String(limit)}</p>) : null}
     </div>
   );
 }
@@ -730,4 +740,19 @@ function List({ title, items }: { title: string; items: string[] }) {
       </div>
     </div>
   );
+}
+
+
+function LongitudinalAtlas({ snapshots, subjectId }: { snapshots: AtlasSnapshot[]; subjectId: string }) {
+  const trajectories = useMemo(() => longitudinalAtlasSummary(snapshots, subjectId), [snapshots, subjectId]);
+  return <div className="mt-5 border-t border-white/10 pt-4">
+    <h3 className="text-base font-medium text-slate-200">Session trajectories</h3>
+    <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-400">Session means and repeated-snapshot uncertainty stay separate by state, source kind and feature schema. These are hand-crafted signal features; adjacent-session cosine depends on their scale.</p>
+    {!trajectories.length ? <p className="mt-3 text-sm text-slate-500">Capture measurements across sessions to inspect longitudinal changes.</p> : trajectories.map((trajectory, index) => <div key={index} className="mt-4 rounded-lg border border-white/10 p-3">
+      <div className="text-sm text-slate-300">{trajectory.state} · {trajectory.sourceKind.replaceAll("_", " ")} · {trajectory.sessions.length} sessions</div>
+      <div className="mt-2 overflow-x-auto"><table className="w-full text-left text-xs text-slate-400"><caption className="sr-only">{trajectory.state} repeated signal measurements</caption><thead><tr><th className="py-2 pr-3">Session</th><th className="py-2 pr-3">Snapshots</th><th className="py-2 pr-3">QC flags</th><th className="py-2">First feature mean ± SE</th></tr></thead><tbody>{trajectory.sessions.map((session) => <tr key={session.sessionId} className="border-t border-white/5"><td className="py-2 pr-3">{session.sessionId}</td><td className="py-2 pr-3">{session.n}</td><td className="py-2 pr-3">{session.flaggedMeasurements}</td><td className="py-2">{trajectory.featureNames[0]}: {session.mean[0].toPrecision(3)} ± {session.standardError[0] === null ? "unknown (one snapshot)" : session.standardError[0].toPrecision(3)}</td></tr>)}</tbody></table></div>
+      {trajectory.adjacentComparisons.map((pair) => <p key={pair.fromSession + pair.toSession} className="mt-2 text-xs text-slate-500">{pair.fromSession} → {pair.toSession}: feature cosine {pair.cosine === null ? "undefined (zero vector)" : pair.cosine.toFixed(3)}</p>)}
+      <p className="mt-2 text-xs text-slate-500">Descriptive only. Repeated windows may overlap; SE is not an independent-session confidence interval.</p>
+    </div>)}
+  </div>;
 }

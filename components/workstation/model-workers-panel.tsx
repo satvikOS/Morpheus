@@ -17,13 +17,16 @@ import {
   type SignalAnalysis,
 } from "@/lib/worker-client";
 import { Metric, Panel, SectionHeader, StatusDot } from "./ui";
+import ModelRunsPanel from "./model-runs-panel";
+import CausalWorkbench from "./causal-workbench";
+import UnifiedModelPanel from "./unified-model-panel";
 
 const engines = [
   {
     name: "Native DSP Core",
-    kind: "Rust",
-    status: "COMPILED",
-    body: "Bounded ring primitives, MRPH binary protocol, radix-2 FFT, band-power utilities, min/max envelope and biquad notch filtering live in morpheus-core.",
+    kind: "C++20 / Rust reference",
+    status: "IMPLEMENTED",
+    body: "C++ MRPH, bounded ring, DSP and local recorder have executable tests. The Rust reference remains until full migration parity is measured. Deployment availability is reported by the gateway.",
     icon: Cpu,
   },
   {
@@ -64,10 +67,12 @@ const engines = [
 ];
 
 export default function ModelWorkersPanel({
+  gateway,
   samples,
   channelSamples,
   sampleRate,
 }: {
+  gateway: string;
   samples: number[];
   channelSamples: number[][];
   sampleRate: number;
@@ -138,11 +143,14 @@ export default function ModelWorkersPanel({
 
   return (
     <div className="space-y-4">
+      <UnifiedModelPanel gateway={gateway} />
+      <CausalWorkbench gateway={gateway} />
+      <ModelRunsPanel gateway={gateway} />
       <Panel>
         <SectionHeader
           eyebrow="Compute fabric"
           title="Model and signal workers"
-          description="Morpheus now has a compiled Rust DSP/acquisition core plus a browser-worker preview path. Native and browser execution are shown separately so a staged model service is never presented as active compute."
+          description="Native acquisition, local science jobs and browser preview diagnostics have separate execution boundaries. Runtime availability depends on the connected gateway."
           action={
             <button
               onClick={() => setAuto((value) => !value)}

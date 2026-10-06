@@ -29,6 +29,8 @@ import ResearchProgramsPanel from "@/components/workstation/research-programs-pa
 import SimulationPanel from "@/components/workstation/simulation-panel";
 import SystemPanel from "@/components/workstation/system-panel";
 import WorkspacePanel from "@/components/workstation/workspace-panel";
+import ResearchLibraryPanel from "@/components/workstation/research-library-panel";
+import CommandPalette from "@/components/workstation/command-palette";
 import MorpheusLogo from "@/components/morpheus-logo";
 import type { GatewayStatus, StreamInfo, WorkstationView } from "@/lib/morpheus";
 import { useSignalEngine } from "@/lib/use-signal-engine";
@@ -59,7 +61,8 @@ const navItems: NavItem[] = [
   { id: "dataset", label: "Dataset Zero", icon: Database, hint: "Ground truth" },
   { id: "experiments", label: "Experiments", icon: FlaskConical, hint: "Markers & sessions" },
   { id: "programs", label: "M0–M5 Programs", icon: BookOpenCheck, hint: "Research stack" },
-  { id: "models", label: "Model Workers", icon: BrainCircuit, hint: "Compute fabric" },
+  { id: "library", label: "Research Library", icon: BookOpenCheck, hint: "Papers, methods & evidence" },
+  { id: "models", label: "Methods & Runs", icon: BrainCircuit, hint: "Applied research & compute" },
   { id: "simulation", label: "Simulation", icon: Activity, hint: "Synthetic systems" },
   { id: "public-data", label: "Public Data", icon: ScanSearch, hint: "Open archives" },
   { id: "visual", label: "3D Neuro Space", icon: Sparkles, hint: "Volume + spatial" },
@@ -88,13 +91,25 @@ export default function Home() {
   const samples = channelSamples[0] ?? [];
 
   useEffect(() => {
+    const restoreView = () => {
+      const candidate = window.location.hash.slice(1);
+      if (navItems.some((item) => item.id === candidate)) setView(candidate as WorkstationView);
+    };
+    restoreView();
+    window.addEventListener("hashchange", restoreView);
     try {
       const saved = localStorage.getItem("morpheus.gateway");
       if (saved) setGatewayState(saved);
       const savedSource = localStorage.getItem("morpheus.source");
       if (savedSource) setSelectedSourceId(savedSource);
     } catch {}
+    return () => window.removeEventListener("hashchange", restoreView);
   }, []);
+
+  const navigate = (next: WorkstationView) => {
+    setView(next);
+    window.location.hash = next;
+  };
 
   const setGateway = (value: string) => {
     setGatewayState(value);
@@ -166,6 +181,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen">
+      <a className="skip-link" href="#workspace-content">Skip to workspace</a>
       <div className="workstation-shell">
         <aside className="workstation-sidebar">
           <div className="px-3 pb-5 pt-3">
@@ -176,17 +192,20 @@ export default function Home() {
                   Morpheus
                 </div>
                 <div className="mt-0.5 text-[9px] uppercase tracking-[.22em] text-slate-650">
-                  Research OS · v0.7
+                  Research workstation · v0.8
                 </div>
               </div>
             </div>
           </div>
 
-          <nav className="space-y-1 overflow-y-auto pr-1">
+          <nav className="space-y-1 overflow-y-auto pr-1" aria-label="Workspaces">
             {navItems.map(({ id, label, icon: Icon, hint }) => (
               <button
                 key={id}
-                onClick={() => setView(id)}
+                onClick={() => navigate(id)}
+                aria-current={view === id ? "page" : undefined}
+                aria-label={label}
+                title={label}
                 className={`nav-item ${view === id ? "nav-item-active" : ""}`}
               >
                 <span className="nav-icon">
@@ -252,6 +271,7 @@ export default function Home() {
             </div>
 
             <div className="topbar-status">
+              <CommandPalette items={navItems} onNavigate={navigate} />
               <div>
                 <span>Source</span>
                 <strong>
@@ -271,9 +291,10 @@ export default function Home() {
                 <strong>{signal.frameRate || "—"}</strong>
               </div>
               <button
-                onClick={() => setView("system")}
+                onClick={() => navigate("system")}
                 className="button-icon"
                 title="System diagnostics"
+                aria-label="System diagnostics"
               >
                 <Gauge size={14} />
               </button>
@@ -294,6 +315,8 @@ export default function Home() {
           />
 
           <div
+            id="workspace-content"
+            tabIndex={-1}
             className={`workstation-content ${
               view === "visual" ? "workstation-content-visual" : ""
             }`}
@@ -315,7 +338,7 @@ export default function Home() {
                 clockSync={signal.clockSync}
                 emitMarker={signal.emitMarker}
                 active={view === "workspace"}
-                onNavigate={setView}
+                onNavigate={navigate}
               />
             </div>
 
@@ -326,7 +349,7 @@ export default function Home() {
                 latency={latency}
                 sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
                 sourceMode={signal.sourceMode}
-                onNavigate={setView}
+                onNavigate={navigate}
               />
             ) : null}
 
@@ -369,7 +392,7 @@ export default function Home() {
             </div>
             {view === "programs" ? (
               <ResearchProgramsPanel
-                onNavigate={setView}
+                onNavigate={navigate}
                 channelSamples={channelSamples}
                 sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
                 sourceName={signal.sourceName}
@@ -378,6 +401,7 @@ export default function Home() {
             ) : null}
             {view === "models" ? (
               <ModelWorkersPanel
+                gateway={gateway}
                 samples={samples}
                 channelSamples={channelSamples}
                 sampleRate={signal.nominalSampleRate || signal.frameRate || 256}
@@ -385,6 +409,7 @@ export default function Home() {
             ) : null}
             {view === "simulation" ? <SimulationPanel /> : null}
             {view === "public-data" ? <PublicDataPanel /> : null}
+            {view === "library" ? <ResearchLibraryPanel /> : null}
             <div
               className={view === "visual" ? "persistent-surface" : "persistent-surface persistent-surface-hidden"}
               aria-hidden={view !== "visual"}

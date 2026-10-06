@@ -20,6 +20,17 @@ type SourceConfig = {
 
 const sources: SourceConfig[] = [
   {
+    id: "dream",
+    label: "DREAM",
+    route: "/api/public-data/dream",
+    institution: "International DREAM collaboration",
+    platform: "Figshare versioned public metadata",
+    access_mode: "anonymous-api",
+    capability: "Sleep EEG and mentation registry; preserve without-recall and no-experience labels",
+    homepage: "https://bridges.monash.edu/articles/dataset/The_DREAM_database/22133105",
+    status_note: "Access differs by source dataset. This adapter imports registry metadata only.",
+  },
+  {
     id: "dandi",
     label: "DANDI",
     route: "/api/public-data/dandi",
@@ -173,7 +184,7 @@ export async function GET(request: NextRequest) {
       const started = performance.now();
 
       try {
-        const response = await fetch(url, { cache: "no-store" });
+        const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(12000) });
         const payload = await response.json();
 
         return {
