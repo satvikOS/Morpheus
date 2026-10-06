@@ -35,6 +35,7 @@ export type WorkstationView =
   | "models"
   | "simulation"
   | "public-data"
+  | "library"
   | "visual"
   | "system";
 

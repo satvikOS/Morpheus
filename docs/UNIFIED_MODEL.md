@@ -1,0 +1,51 @@
+# One shared Morpheus representation
+
+The local `morpheus-shared-encoder` adapter jointly trains one feature-token Transformer and two output heads. A scalar value projection and learned feature identities form tokens; one four-head encoder layer with GELU mixes them; mean pooling and LayerNorm produce the shared latent. Classification cross-entropy and training-scaled measured-outcome MSE both update that representation through one AdamW optimizer. The fixed joint loss is `CE(all labels) + 0.5 × MSE(observed outcomes)`. Explicit null ratings contribute no outcome gradient, outcome scaling or regression metric; their report labels remain in classification. This implements shared learning rather than combining reports from independent tools.
+
+The [Transformer source](https://arxiv.org/abs/1706.03762) supports the self-attention adaptation, and [Caruana's multitask-learning source](https://link.springer.com/article/10.1023/A:1007379606734) supports learning parallel tasks with shared parameters. The numerical feature tokens, single encoder block, pooled latent, selected heads and loss weight are Morpheus engineering choices. Neither source's complete architecture, original datasets, pretrained weights or benchmarks is reproduced. Whether multitask training improves over matched single-task models remains an open ablation.
+
+## What affects training now
+
+`lib/unified-model.ts` records seven admitted software contributions with exact slot, code-component, version and test mappings:
+
+| Contribution | Active model slot | Effect |
+| --- | --- | --- |
+| Feature-token Transformer | Shared backbone | One learned self-attention representation feeds both heads. |
+| Shared multitask optimization | Joint objective | Both losses update the same encoder and optimizer. |
+| Category target | Classification | Learns the dataset's explicitly defined class. |
+| Measured response target | Outcome regression | Learns a supplied bounded numerical measurement. |
+| Training-fold scaling | Preprocessing control | Features fit training subjects only; outcomes fit observed training measurements only. |
+| Whole-unit evaluation | Evaluation control | Entire independent subjects are held out; trial or awakening counts do not become subject counts. |
+| Input and perturbation provenance | Data admission control | Requires pre-event features, observational assignment, independent-unit review and source/schema/license metadata. |
+
+The public-data target contract comes from the reviewed [Guo/Inagaki circuit dataset context](https://doi.org/10.1038/nature22324). Its classification labels are stimulated/control; its regression target is a measured neural firing-rate summary. Those labels are not dream content. Dataset provenance and stimulus controls contribute to the same training contract, but do not create a causal loss or remove experimental confounding. Target/post-event feature names are rejected; declarations of input timing still require independent audit. In the inspected pilot files, no-stimulation controls are not sham and an optical waveform onset is not verified.
+
+Runtime bindings name `train_unified` and `validate_unified_request` plus code-component anchors. Weights and control logic live in `services/signal-gateway/app/unified_model.py`. Synthetic tests verify held-out-unit learning, admission, cancellation and actual checkpoint restoration. A public-recording pilot trained on 1,776 trials from seven animals with width 32, 30 epochs and 8,899 parameters. Held-out balanced accuracy was 0.4817 against chance 0.5. Outcome MAE was 1.9603, versus train-mean 1.9731, weighted-median 1.9627 and train-fold ridge 1.8484. Classification is near chance and the shared model does not beat the linear control. These results establish execution and an improvement target, not a biological finding or a multitask benefit.
+
+The exported JSON inference checkpoint includes source assets/license/schema, outcome units, training-config fingerprint, seed/epochs, preprocessing and implementation/contribution hashes. `tools/model_predict.py` requires its canonical SHA-256, accepts only matching schema/features, restores only this reviewed architecture, and writes a new private file. Tests compare CLI predictions with direct restored-model predictions. It is an inference checkpoint; optimizer/RNG state for exact training continuation is not exported.
+
+## Admission and thousands-scale growth
+
+A paper begins as `PENDING_REVIEW`. Metadata discovery can only create that state; it cannot select losses, runtime symbols, model weights or execution URLs. A reviewed method with a defined contract may become `PENDING_IMPLEMENTATION`. Admission requires an implemented, tested, allowlisted mapping to a current backbone/objective/control slot and an explicit engineering review. Dataset and paper context are distinguished from `implemented_technique_adaptation`. Source review alone never promotes a paper to an active method.
+
+Sleep-report category adaptation, visual reconstruction and semantic decoding remain pending. New modalities need compatible licensed inputs and measured targets, implemented adapters/objectives, held-out evaluation and ablation evidence. Merely sharing a generic classification head is insufficient to claim that a published sleep decoder has been integrated. New slots require a reviewed architecture-version change.
+
+The graph is a repository-reviewed registry, not a public code-upload service. It supports deterministic stable-ID pages of up to 100 contributions, text/status/slot/paper filters and a pinned graph version. Regression tests page a 3,000-entry **fixture** to verify scaling; the current registry contains seven admitted contributions and three pending extensions. These counts are separate from paper counts, validated findings and trained checkpoints. Growing to thousands of actual implemented contributions requires that same implementation and admission work for each new mapping; it is not achieved by collecting thousands of abstracts.
+
+Each dataset experiment currently trains its own checkpoint under an identical architecture and a declared fixed feature schema. The circuit and sleep pilots do not share one jointly trained cross-species checkpoint. A single larger multimodal model requires compatible modality encoders, explicit domain/task masks, aligned targets, controls against negative transfer, and sufficient training resources before admission.
+
+## Immutable model/run contract
+
+`GET /api/research/model` serves architecture and a contribution exploration page. `format=manifest` returns the **complete** admitted manifest even if the page filter selects only pending papers; `format=export` adds a versioned graph-page export. This public endpoint exposes no private feature rows or model weights and accepts no training/admission POST.
+
+`createUnifiedModelRunRequest` forces method `unified-model`, model ID `morpheus-shared-encoder`, recipe `morpheus-shared-representation-v1@1.1.0`, reviewed source mappings, bounded options and the full contribution manifest. Caller-supplied execution URLs, losses, weights, model IDs and contribution overrides are not forwarded. Graph version `1.1.0` pins the complete architecture/objective weights, input/compute contract and every admitted contribution's ID/version/role/slots/source mappings/runtime bindings; SHA-256 uses recursively sorted-key JSON without the hash field. It is frozen in the client helper. The local gateway validates it against its reviewed allowlist and preserves it in the canonical run/checkpoint alongside the implementation-file hash. Previously sealed jobs retain their earlier manifests. A content hash proves a comparison, not the scientific truth or review quality of a contribution.
+
+After reviewing a registry change, run `node scripts/export-unified-manifest.cjs` to regenerate the committed gateway allowlist `services/signal-gateway/app/unified-contributions.json`. Use `--check` for a read-only drift gate. The graph regression suite compares the built-in JavaScript manifest with that file and verifies its canonical hash using Python's JSON/SHA-256 implementation. Admission/schema changes require version review and rerunning the gateway boundary and training tests; metadata discovery never regenerates the allowlist.
+
+The local input contract admits 48–4,096 rows, 1–32 ordered numerical features, 2–8 classes and 6–16 independent units with at least two rows/class/unit and two observed outcomes/unit. Unmeasured outcomes must be explicit null; omitted targets are rejected. Outcome coverage is stored by label, and inference flags predictions in classes without rating supervision. Epochs are 10–100, hidden width is 16/32/64, batch size is 64 and the runtime bounds an operation estimate. CPU execution uses one thread and a recorded seed. These are engineering compute and input bounds, not power or adequacy guarantees.
+
+Each evaluation fold holds out one entire independent subject. Training-only normalization and equal-unit/class weighting reduce leakage and pseudo-replication. The final JSON state dictionary refits all admitted rows only after held-out evaluation; those final weights are not another held-out test. Checkpoints contain architecture, ordered feature names, labels, normalization and provenance, without an executable pickle. Fixture-training status and public-data benchmark status must remain separate. A small shared neural-feature pilot does not establish a universal brain model, audiovisual memory recovery or disease treatment.
+
+## Missing measurements in dream-report datasets
+
+Version 1.1 keeps Experience, NoExperience and WithoutRecall as distinct classification labels when all are measured. A rating recorded only for Experience supervises the outcome head only in that population. It does not define NoExperience or WithoutRecall as numerical zero. Equal-subject regression weights divide by each training subject's observed-rating count; mean, median and ridge controls use the same observed targets. Held-out regression MAE is the macro-average of subject MAEs over their measured ratings. Missingness by report category limits generalization and is preserved in run/checkpoint coverage. The final classifier's softmax scores are not calibrated probabilities of a dream's existence.

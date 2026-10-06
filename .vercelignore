@@ -1,0 +1,16 @@
+.venv/
+venv/
+.local/
+tmp/
+artifacts/
+recordings/
+data/private/
+data/raw/
+data/subjects/
+native/**/target/
+native/**/build*/
+services/**/build*/
+**/__pycache__/
+**/*.pyc
+*.tsbuildinfo
+.env*

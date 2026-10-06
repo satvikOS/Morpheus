@@ -12,11 +12,17 @@ import {
   Trash2,
 } from "lucide-react";
 import type { MarkerEvent } from "@/lib/morpheus";
+import { downloadJson } from "@/lib/morpheus";
 import type {
   ClockSyncState,
   SignalEngineState,
 } from "@/lib/use-signal-engine";
 import {
+  protocolDigest,
+  transitionTrial,
+  scoreTrial,
+  blindedScoringPacket,
+  type TrialProtocol,
   deleteReinstatementTrial,
   listReinstatementTrials,
   putReinstatementTrial,
@@ -60,11 +66,23 @@ export default function ExperimentsPanel({
   const [postDreamId, setPostDreamId] = useState("");
   const [continuityScore, setContinuityScore] = useState(3);
   const [notes, setNotes] = useState("");
-  const [blinded, setBlinded] = useState(true);
+  const [operatorId, setOperatorId] = useState("operator-001");
+  const [scoringRule, setScoringRule] = useState("0: no shared structure; 1–2: partial overlap; 3–4: multiple matching events or spatial relationships; 5: detailed continuation. Score against sealed reports, not familiarity alone.");
+  const [analysisPlan, setAnalysisPlan] = useState("Report counts, means and score ≥3 rates separately by delay and intention condition. Operator scores are unblinded; no causal or population inference.");
+  const [trialError, setTrialError] = useState("");
+  const [trialBusy, setTrialBusy] = useState(false);
   const [activeTrial, setActiveTrial] = useState<ReinstatementTrial | null>(null);
 
   useEffect(() => {
-    void listReinstatementTrials().then(setTrials).catch(() => {});
+    let active = true;
+    void listReinstatementTrials().then((rows) => {
+      if (!active) return;
+      setTrials(rows);
+      const pendingTrial = rows.find((row) => row.schemaVersion === "reinstatement-trial-v2" && row.state !== "SCORED" && row.state !== "EXCLUDED") || null;
+      setActiveTrial(pendingTrial);
+      if (pendingTrial?.protocol) { setOperatorId(pendingTrial.protocol.operatorId); setPreDreamId(pendingTrial.preDreamId || ""); setDelaySeconds(pendingTrial.delaySeconds); setIntentionCondition(pendingTrial.intentionCondition); }
+    }).catch((error: unknown) => { if (active) setTrialError(error instanceof Error ? error.message : "Trials could not be loaded."); });
+    return () => { active = false; };
   }, []);
 
   const summary = useMemo(
@@ -173,19 +191,36 @@ export default function ExperimentsPanel({
     }
   };
 
+  const withTrialError = async (action: () => Promise<void>) => {
+    if (trialBusy) return;
+    setTrialBusy(true); setTrialError("");
+    try { await action(); }
+    catch (error) { setTrialError(error instanceof Error ? error.message : "Trial operation failed. Local data was not advanced."); }
+    finally { setTrialBusy(false); }
+  };
+
   const startTrial = async () => {
+    if (activeTrial) return;
+    if (!operatorId.trim() || !scoringRule.trim() || !analysisPlan.trim() || !preDreamId.trim()) throw new Error("Enter the operator ID, pre-report ID, scoring rule and analysis plan before registration.");
+    const createdAt = new Date().toISOString();
+    const protocol: TrialProtocol = {
+      version: "m2-protocol-v2", registeredAt: createdAt, operatorId: operatorId.trim(), delaySeconds,
+      intentionCondition, assignment: "manual", scoringRule, analysisPlan, preDreamId: preDreamId.trim(),
+    };
     const trial: ReinstatementTrial = {
       id: crypto.randomUUID(),
       sessionId:
         recording.session_id ||
         sessionId ||
         "m2-" + Date.now(),
-      createdAt: new Date().toISOString(),
+      createdAt,
+      schemaVersion: "reinstatement-trial-v2", protocol, protocolSha256: await protocolDigest(protocol),
+      state: "CREATED", transitions: [{ state: "CREATED", at: createdAt, reason: "Local prospective protocol snapshot registered; manual condition assignment" }],
       delaySeconds,
       intentionCondition,
       preDreamId: preDreamId.trim() || undefined,
       continuityScore: null,
-      blinded,
+      blinded: false,
       notes: "",
     };
 
@@ -204,23 +239,21 @@ export default function ExperimentsPanel({
 
   const markAwakening = async () => {
     if (!activeTrial || !armed) return;
-    await sendMarker("AWAKEN", {
+    const marker = await sendMarker("AWAKEN", {
       trial_id: activeTrial.id,
       delay_seconds: activeTrial.delaySeconds,
     });
+    if (!marker) return;
+    const next = transitionTrial(activeTrial, "AWAKENED", `Operator awakening marker (${marker.source}; ${marker.clock_domain})`, new Date().toISOString(), marker.id);
+    await putReinstatementTrial(next);
+    setActiveTrial(next);
+    setTrials((rows) => rows.map((row) => row.id === next.id ? next : row));
   };
 
   const completeTrial = async () => {
     if (!activeTrial) return;
 
-    const complete: ReinstatementTrial = {
-      ...activeTrial,
-      postDreamId: postDreamId.trim() || undefined,
-      continuityScore,
-      notes: notes.trim(),
-      blinded,
-      completedAt: new Date().toISOString(),
-    };
+    const complete = scoreTrial(activeTrial, continuityScore, postDreamId, notes, operatorId);
 
     await putReinstatementTrial(complete);
     setTrials((current) =>
@@ -229,6 +262,10 @@ export default function ExperimentsPanel({
       ),
     );
 
+    setActiveTrial(null);
+    setPostDreamId("");
+    setNotes("");
+
     if (armed) {
       await sendMarker("M2_TRIAL_END", {
         trial_id: complete.id,
@@ -236,13 +273,19 @@ export default function ExperimentsPanel({
         blinded: complete.blinded,
       });
     }
+  };
 
-    setActiveTrial(null);
-    setPostDreamId("");
-    setNotes("");
+  const excludeTrial = async (trial: ReinstatementTrial) => {
+    const reason = window.prompt("Exclusion reason (retained in the trial history)");
+    if (!reason?.trim()) return;
+    const next = transitionTrial(trial, "EXCLUDED", reason.trim());
+    await putReinstatementTrial(next);
+    setTrials((rows) => rows.map((row) => row.id === next.id ? next : row));
+    if (activeTrial?.id === next.id) setActiveTrial(null);
   };
 
   const removeTrial = async (id: string) => {
+    if (!window.confirm("Delete this local trial and its protocol history? Export a backup first if it must be retained.")) return;
     await deleteReinstatementTrial(id);
     setTrials((current) =>
       current.filter((trial) => trial.id !== id),
@@ -252,16 +295,13 @@ export default function ExperimentsPanel({
 
   return (
     <div className="space-y-4">
+      {trialError ? <div role="alert" className="rounded-lg border border-red-400/30 bg-red-950/20 p-4 text-sm text-red-200">{trialError}</div> : null}
       <Panel>
         <SectionHeader
           eyebrow="M2 execution"
           title="Experiment control"
-          description="Run controlled interruption trials with explicit delay conditions, intention condition, synchronized marker provenance and blinded continuation scoring."
-          action={
-            <span className="tag">
-              {trials.length} LOCAL TRIALS
-            </span>
-          }
+          description="Record prospective interruption protocols and marker provenance. Scores entered by this operator are unblinded. Independent assessor packets can be exported without delay or intention conditions."
+          action={<button className="button-secondary" disabled={!trials.length} onClick={() => downloadJson("morpheus-m2-trials.json", { schema: "morpheus-reinstatement-export-v2", exportedAt: new Date().toISOString(), storagePlane: "local", trials })}>Export {trials.length} local trials</button>}
         />
         <div className="experiment-summary-grid">
           <div>
@@ -488,7 +528,7 @@ export default function ExperimentsPanel({
         <SectionHeader
           eyebrow="Reinstatement trial"
           title="Controlled interruption protocol"
-          description="Create a prospective trial before the awakening. The delay condition and intention condition are fixed before scoring."
+          description="Register a local protocol snapshot before the awakening. Manual assignment, scoring rule and analysis plan are sealed with a digest. This records intent; it is not external preregistration or hardware timing verification."
           action={
             activeTrial ? (
               <span className="tag">
@@ -504,6 +544,7 @@ export default function ExperimentsPanel({
 
         <div className="reinstatement-grid">
           <div className="reinstatement-control">
+            <label className="field-label mb-3 block"><span>Operator / annotator ID</span><input className="research-input" value={operatorId} disabled={Boolean(activeTrial)} onChange={(event) => setOperatorId(event.target.value)} /></label>
             <label className="field-label">
               <span>Return-to-sleep delay</span>
               <select
@@ -556,14 +597,17 @@ export default function ExperimentsPanel({
                 onChange={(event) =>
                   setPreDreamId(event.target.value)
                 }
-                placeholder="Optional Dataset Zero ID"
+                placeholder="Sealed Dataset Zero report ID"
               />
             </label>
 
+            <label className="field-label mt-3 block"><span>Prospective scoring rule</span><textarea className="dataset-textarea" rows={4} value={activeTrial?.protocol?.scoringRule || scoringRule} disabled={Boolean(activeTrial)} onChange={(event) => setScoringRule(event.target.value)} /></label>
+            <label className="field-label mt-3 block"><span>Analysis plan</span><textarea className="dataset-textarea" rows={3} value={activeTrial?.protocol?.analysisPlan || analysisPlan} disabled={Boolean(activeTrial)} onChange={(event) => setAnalysisPlan(event.target.value)} /></label>
             {!activeTrial ? (
               <button
                 className="button-primary mt-4 w-full"
-                onClick={() => void startTrial()}
+                disabled={trialBusy}
+                onClick={() => void withTrialError(startTrial)}
               >
                 <Play size={13} />
                 Pre-register trial
@@ -571,8 +615,8 @@ export default function ExperimentsPanel({
             ) : (
               <button
                 className="button-secondary mt-4 w-full"
-                disabled={!armed}
-                onClick={() => void markAwakening()}
+                disabled={!armed || trialBusy || activeTrial.state !== "CREATED"}
+                onClick={() => void withTrialError(markAwakening)}
               >
                 <TimerReset size={13} />
                 Emit AWAKEN marker
@@ -636,20 +680,8 @@ export default function ExperimentsPanel({
                   />
                 </label>
 
-                <button
-                  className={
-                    blinded
-                      ? "mode-pill mode-pill-live mt-3"
-                      : "mode-pill mt-3"
-                  }
-                  onClick={() =>
-                    setBlinded((value) => !value)
-                  }
-                >
-                  {blinded
-                    ? "BLINDED SCORE"
-                    : "UNBLINDED"}
-                </button>
+                <p className="mt-3 text-sm text-slate-400">Operator score · unblinded. The condition is visible in this workstation.</p>
+                <p className="mt-2 text-xs text-slate-500">State: {activeTrial.state} · protocol {activeTrial.protocol?.version}<br />Digest: {activeTrial.protocolSha256?.slice(0, 20)}…</p>
 
                 <label className="field-label mt-4 block">
                   <span>Scoring notes</span>
@@ -665,9 +697,8 @@ export default function ExperimentsPanel({
 
                 <button
                   className="button-primary mt-4 w-full"
-                  onClick={() =>
-                    void completeTrial()
-                  }
+                  disabled={trialBusy || !postDreamId.trim()}
+                  onClick={() => void withTrialError(completeTrial)}
                 >
                   Complete trial
                 </button>
@@ -687,7 +718,8 @@ export default function ExperimentsPanel({
       <Panel>
         <SectionHeader
           eyebrow="M2 local dataset"
-          title="Delay-response summary"
+          title="Descriptive condition summary"
+          description="Conditions, protocol versions and claimed blinding remain separate. Excluded trials are retained but omitted. Means and rates are descriptive, without significance or causal claims."
           action={
             <span className="tag-muted">
               {summary.length} CONDITIONS
@@ -698,7 +730,7 @@ export default function ExperimentsPanel({
         {summary.length ? (
           <div className="reinstatement-summary">
             {summary.map((row) => (
-              <div key={row.delaySeconds}>
+              <div key={`${row.delaySeconds}-${row.intentionCondition}-${row.blinded}-${row.protocolVersion}`}>
                 <span>
                   {row.delaySeconds < 60
                     ? row.delaySeconds + " s"
@@ -709,7 +741,7 @@ export default function ExperimentsPanel({
                 </strong>
                 <small>
                   {(row.continuationRate * 100).toFixed(0)}
-                  % ≥3 · n={row.n}
+                  % ≥3 · n={row.n} · {row.intentionCondition ? "intention" : "control"} · {row.blinded ? "claimed blind (legacy if applicable)" : "unblinded"} · {row.protocolVersion}
                 </small>
               </div>
             ))}
@@ -747,11 +779,14 @@ export default function ExperimentsPanel({
                       : "UNBLINDED"}
                   </span>
                 </div>
+                <button className="button-secondary" onClick={() => downloadJson("m2-assessor-packet.json", blindedScoringPacket(trial, crypto.randomUUID()))}>Assessor packet</button>
+                {trial.schemaVersion === "reinstatement-trial-v2" && trial.state !== "EXCLUDED" ? <button className="button-secondary" disabled={trialBusy} onClick={() => void withTrialError(() => excludeTrial(trial))}>Exclude with reason</button> : null}
+                {trial.state === "EXCLUDED" ? <span className="text-xs text-slate-400">Excluded: {trial.exclusionReason}</span> : null}
                 <button
                   className="button-icon"
                   title="Delete local trial"
                   onClick={() =>
-                    void removeTrial(trial.id)
+                    void withTrialError(() => removeTrial(trial.id))
                   }
                 >
                   <Trash2 size={12} />

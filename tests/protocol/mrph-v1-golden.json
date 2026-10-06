@@ -1,0 +1,67 @@
+{
+  "schema": "morpheus-protocol-golden-v1",
+  "endianness": "little",
+  "header_bytes": 24,
+  "oracle": "services/signal-gateway/app/protocol.py",
+  "cases": [
+    {
+      "stream": "EEG",
+      "sample_rate": 1024,
+      "samples": [
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          4
+        ]
+      ],
+      "timestamps": [
+        10,
+        10.0009765625
+      ],
+      "simulated": true,
+      "sequence": 42,
+      "expected_hex": "4d525048010001002a00000088fc2dce000080440200020000000000000024400000803f0000004000000000800024400000404000008040"
+    },
+    {
+      "stream": "Morpheus-\u00e9",
+      "sample_rate": 0,
+      "samples": [
+        [
+          0,
+          -0.0,
+          -1.25
+        ]
+      ],
+      "timestamps": [
+        -12.5
+      ],
+      "simulated": false,
+      "sequence": 4294967295,
+      "expected_hex": "4d52504801000000ffffffffd3fbd66f000000000300010000000000000029c000000000000000800000a0bf"
+    },
+    {
+      "stream": "synthetic",
+      "sample_rate": 256,
+      "samples": [
+        [
+          0.1,
+          -0.2
+        ],
+        [
+          0.3,
+          -0.4
+        ]
+      ],
+      "timestamps": [
+        1,
+        1.004
+      ],
+      "simulated": true,
+      "sequence": 0,
+      "expected_hex": "4d5250480100010000000000f8c680460000804302000200000000000000f03fcdcccc3dcdcc4cbeaaf1d24d6210f03f9a99993ecdccccbe"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake g++ make && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY CMakeLists.txt ./
+COPY src ./src
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --parallel 2
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 && rm -rf /var/lib/apt/lists/*
+COPY --from=build /source/build/morpheus_cloud /usr/local/bin/morpheus_cloud
+USER 65532:65532
+ENV PORT=8080 MORPHEUS_CLOUD_BIND=0.0.0.0
+EXPOSE 8080
+CMD ["/usr/local/bin/morpheus_cloud"]

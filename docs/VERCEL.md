@@ -1,29 +1,23 @@
-# Vercel deployment
+# Vercel and local execution
 
-This repository should be deployed as a standard **Next.js** application from the repository root.
+The root `vercel.json` defines three services on Node 24:
 
-The local FastAPI signal gateway is intentionally **not** deployed as a Vercel service. It depends on native LSL / BrainFlow access and should run on the acquisition workstation.
+| Service | Runtime | Responsibility |
+| --- | --- | --- |
+| frontend | Next.js | Workstation, static recipes, public metadata routes |
+| signal-gateway | FastAPI | Hosted capability/health surface; hardware adapters and private jobs stay local |
+| cloud-cpp | Container, `Dockerfile.vercel` | Bounded read-only health/version/metadata HTTP process |
 
-## Project settings
+Routing dispatches `/api/cloud-cpp/*` and `/api/signal-gateway/*` before the frontend catch-all. The C++ process understands its service prefix. Container deployment requires Vercel container support; local executable verification alone does not establish that the remote image deployed.
 
-- Framework: Next.js
-- Root Directory: `./`
-- Build Command: `pnpm build`
-- Install Command: `pnpm install`
-- Output Directory: leave as Next.js default / `.next`
+Use `npm ci`, `npm run typecheck`, `npm run test:worker`, and `npm run build`. `package-lock.json` pins the resolved graph. Python CI uses 3.12. Production headers retain cross-origin isolation for display buffers and hardware API permissions.
 
-## Environment
+For private analysis, run the local gateway bound to `127.0.0.1`, explicitly set `MORPHEUS_MODEL_RUN_DIR` to a private directory, and select that gateway in Acquisition. Persistent jobs refuse execution when `VERCEL=1`. CORS permits the known production origin and HTTP loopback origins; a preview needs an explicit `MORPHEUS_ALLOWED_ORIGINS` entry. Access from public HTTPS to local HTTP is browser-policy-dependent and must be checked on the actual browser. Do not expose the acquisition service publicly as a workaround.
 
-Set:
+Deploy a preview through `satvikos-projects/morpheus`, verify service routing and the complete UI, then promote a verified build. Outcomes and limitations are recorded in `docs/EXECUTION_REPORT.md`.
 
-```
-NEXT_PUBLIC_MORPHEUS_GATEWAY_URL=http://localhost:8787
-```
+## 2026-10-06 preview receipt
 
-for local browser development.
+Preview deployment `dpl_CDkr7WpDLnc9VaxAXQtQJs248iUv` is **Ready** at [morpheus-hkou9sxk3-satvikos-projects.vercel.app](https://morpheus-hkou9sxk3-satvikos-projects.vercel.app). Authenticated Vercel CLI requests returned frontend health `status:online`, signal-gateway health `status:online`, and cloud C++ health `status:ok` with `plane:public-metadata`. The public model manifest returned graph version `1.1.0` and contribution content SHA-256 `b13406bc292118c2a98c3312107eb3f2a6128a2bcb93667903ca5141ea3fa924`. The deployment file-tree audit found no private/raw/recording files, `.env` files, DREAM run artifacts or `tmp` files; `.local` and `tmp` directory entries were empty. The preview remained Vercel-auth protected for unauthenticated HTTP clients, as expected for this project.
 
-For a remotely hosted browser, localhost refers to the user's own machine only when accessed by that browser. A production bridge should use a secure tunnel / local agent architecture rather than exposing acquisition endpoints directly to the public internet.
-
-## Why there is only one Vercel service
-
-Vercel detected `services/signal-gateway` because it contains FastAPI code. Morpheus intentionally does **not** deploy that directory as a cloud service. The gateway must remain close to the hardware for latency, device access, and data privacy.
+Production promotion `dpl_FQppbyggPUrGzkXRZB5NbJnKCACP` is **Ready** and aliases [morpheus-three.vercel.app](https://morpheus-three.vercel.app). Authenticated checks returned the same frontend, signal-gateway and cloud C++ health responses, and the production model manifest reported graph version `1.1.0` with the same contribution SHA-256. The production file-tree audit found no private/raw/recording files, `.env` files, DREAM run artifacts or `tmp` files.

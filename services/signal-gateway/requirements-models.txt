@@ -1,0 +1,2 @@
+# Optional local-only shared model pilot. Not installed in the public Vercel API.
+torch==2.14.1

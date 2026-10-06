@@ -8,6 +8,10 @@
     "signal-gateway": {
       "root": "services/signal-gateway",
       "entrypoint": "app.main:app"
+    },
+    "cloud-cpp": {
+      "root": "services/morpheus-cloud-cpp",
+      "runtime": "container"
     }
   },
   "headers": [
@@ -50,6 +54,12 @@
     }
   ],
   "rewrites": [
+    {
+      "source": "/api/cloud-cpp/(.*)",
+      "destination": {
+        "service": "cloud-cpp"
+      }
+    },
     {
       "source": "/api/signal-gateway/(.*)",
       "destination": {
